@@ -1,0 +1,11 @@
+name = "nexo-upload-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "nexo-attachments"
+
+[vars]
+CDN_URL = "https://pub-be485944060140659115bf903d1bf6ca.r2.dev"
+WORKER_URL = "https://nexo-upload-worker.devk.workers.dev"

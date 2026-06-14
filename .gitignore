@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+out/
+
+# Environment variables — NEVER commit real secrets
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
+!**/.env.example
+
+# Cloudflare Wrangler local secrets & cache
+.dev.vars
+.wrangler/
+
+# Tauri / Rust build artifacts
+nexo-desktop/src-tauri/target/
+
+# Database backups & migration artifacts
+_backup_*.sql
+_migrations_backup/
+
+# Agent / internal tooling
+.claude/
+.atl/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

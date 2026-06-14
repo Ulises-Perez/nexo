@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+model User {
+  id            String             @id @default(uuid())
+  username      String             @unique
+  tag           String             @default("")
+  email         String             @unique
+  passwordHash  String
+  avatarUrl     String?
+  status        String             @default("offline")
+  bio           String?            @db.Text
+  bannerUrl     String?
+  bannerColor   String?
+  accentColor   String?
+  pronouns      String?
+  customStatus  String?
+  createdAt     DateTime           @default(now())
+  communities   CommunityMember[]
+  messages      Message[]
+  ownedComms    Community[]        @relation("CommunityOwner")
+  sentRequests     FriendRequest[]  @relation("FriendRequestSender")
+  receivedRequests FriendRequest[]  @relation("FriendRequestReceiver")
+  friendsA        Friendship[]      @relation("FriendshipUserA")
+  friendsB        Friendship[]      @relation("FriendshipUserB")
+  conversationsA  Conversation[]    @relation("ConversationUserA")
+  conversationsB  Conversation[]    @relation("ConversationUserB")
+  communityBans   CommunityBan[]    @relation("BannedUser")
+  connections     UserConnection[]
+}
+
+model UserConnection {
+  id        String   @id @default(uuid())
+  userId    String
+  platform  String
+  name      String
+  url       String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+model Community {
+  id          String             @id @default(uuid())
+  name        String
+  description String?
+  inviteCode  String?            @unique
+  iconUrl     String?
+  ownerId     String
+  createdAt   DateTime           @default(now())
+  owner       User               @relation("CommunityOwner", fields: [ownerId], references: [id])
+  members     CommunityMember[]
+  categories  Category[]
+  roles       Role[]
+  bans        CommunityBan[]
+}
+model CommunityMember {
+  id           String    @id @default(uuid())
+  userId       String
+  communityId  String
+  role         String    @default("member")
+  joinedAt     DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  community    Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  roles        MemberRole[]
+  @@unique([userId, communityId])
+}
+model Role {
+  id          String       @id @default(uuid())
+  communityId String
+  name        String
+  color       String?
+  permissions Int          @default(0)
+  position    Int          @default(0)
+  createdAt   DateTime     @default(now())
+  community   Community    @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  members     MemberRole[]
+  @@index([communityId])
+}
+model MemberRole {
+  id       String          @id @default(uuid())
+  memberId String
+  roleId   String
+  member   CommunityMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  role     Role            @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  @@unique([memberId, roleId])
+}
+model CommunityBan {
+  id          String    @id @default(uuid())
+  communityId String
+  userId      String
+  reason      String?
+  bannedById  String
+  createdAt   DateTime  @default(now())
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  user        User      @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([communityId, userId])
+}
+model Category {
+  id          String    @id @default(uuid())
+  communityId String
+  name        String
+  order       Int       @default(0)
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  channels    Channel[]
+}
+model Attachment {
+  id        String   @id @default(uuid())
+  messageId String
+  name      String
+  size      Int
+  mimeType  String
+  url       String
+  type      String   // 'image' | 'video' | 'audio' | 'file'
+  width     Int?
+  height    Int?
+  duration  Int?
+  createdAt DateTime @default(now())
+
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+}
+
+model Message {
+  id          String        @id @default(uuid())
+  channelId   String
+  userId      String
+  content     String        @db.Text
+  isEdited    Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+  readAt      DateTime?
+
+  attachments Attachment[]
+  channel     Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id])
+
+  @@index([channelId, createdAt])
+  @@index([channelId, readAt])
+}
+
+model FriendRequest {
+  id         String   @id @default(uuid())
+  senderId   String
+  receiverId String
+  status     String   @default("PENDING") // PENDING | ACCEPTED | REJECTED
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  sender     User     @relation("FriendRequestSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User     @relation("FriendRequestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId, status])
+}
+
+model Friendship {
+  id        String   @id @default(uuid())
+  userAId   String
+  userBId   String
+  createdAt DateTime @default(now())
+  userA     User     @relation("FriendshipUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User     @relation("FriendshipUserB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@unique([userAId, userBId])
+  @@index([userAId])
+  @@index([userBId])
+}
+
+model Conversation {
+  id         String   @id @default(uuid())
+  userAId    String
+  userBId    String
+  channelId  String   @unique
+  hiddenForA Boolean  @default(false)
+  hiddenForB Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  userA     User     @relation("ConversationUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User     @relation("ConversationUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([userAId, userBId])
+  @@index([userBId])
+  @@index([channelId])
+}
+
+model Channel {
+  id          String    @id @default(uuid())
+  categoryId  String?
+  name        String
+  type        String    @default("text")
+  order       Int       @default(0)
+  category    Category? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  conversation Conversation?
+}
