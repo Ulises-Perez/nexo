@@ -45,6 +45,10 @@ export interface ChatMessage {
         status: string;
         roleColor?: string | null;
     };
+    // Frontend-only: set on a message's local optimistic echo before the
+    // server confirms it. Server-sourced messages never set these.
+    pending?: boolean;
+    failed?: boolean;
 }
 
 export interface DMFriend {
@@ -100,6 +104,20 @@ export const useChatStore = defineStore('chat', () => {
     // Guard contra cargas concurrentes de páginas más antiguas (por canal).
     const loadingOlder = new Set<string>();
 
+    // Envíos optimistas en vuelo, por clientNonce. Permite reconciliar (o marcar
+    // como fallido) el eco local cuando llega el ack o el evento new_message.
+    const pendingSends = new Map<string, { channelId: string }>();
+
+    // Espeja el sanitizado del backend (sockets/index.ts) para que el eco local
+    // no cambie de aspecto cuando se reemplaza por el mensaje real del servidor.
+    const escapeLikeServer = (s: string): string => s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/\//g, '&#x2F;');
+
     // Une dos listas de mensajes deduplicando por id y ordenando por createdAt asc.
     const mergeById = (a: ChatMessage[], b: ChatMessage[]): ChatMessage[] => {
         const byId = new Map<string, ChatMessage>();
@@ -132,7 +150,13 @@ export const useChatStore = defineStore('chat', () => {
         }
     };
     const activeDMUser = ref<DMFriend | null>(null);
-    const isLoadingHistory = ref(false);
+    // Canales cuya primera página de mensajes está en vuelo. Por-canal (no un
+    // solo booleano) para que cambiar de canal mientras carga uno no borre el
+    // loading del otro.
+    const loadingChannels = ref(new Set<string>());
+    const isLoadingHistory = computed(() =>
+        !!activeChannelId.value && loadingChannels.value.has(activeChannelId.value)
+    );
     const shouldShowFriends = ref(false);
     // Vista del panel de inicio (sin comunidad ni DM activos): la lista de
     // amigos (HomeMain) o la vista dedicada de solicitudes (FriendRequests).
@@ -203,19 +227,23 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         console.log('[FETCH] Obteniendo mensajes para canal:', channelId);
-        isLoadingHistory.value = true;
+        loadingChannels.value.add(channelId);
         try {
             // Página más reciente: el server ya devuelve orden ascendente.
             const response = await api.get(`/channels/${channelId}/messages?limit=${PAGE_SIZE}`);
             console.log('[FETCH] Status:', response.status);
             const data = response.data as ChatMessage[];
             console.log('[FETCH] Mensajes recibidos:', data.length, data);
-            applyFetchedMessages(channelId, data);
+            // Re-leer el cache DESPUÉS del await: un envío optimista pudo haberse
+            // agregado mientras esta primera página estaba en vuelo. Sin este merge,
+            // el fetch reemplazaría el array entero y borraría ese eco.
+            const existing = messageCache.value.get(channelId) ?? [];
+            applyFetchedMessages(channelId, existing.length ? mergeById(existing, data) : data);
             hasMoreOlder.value.set(channelId, data.length === PAGE_SIZE);
         } catch (error: any) {
             console.error('[FETCH] Error:', error.response?.status, error);
         } finally {
-            isLoadingHistory.value = false;
+            loadingChannels.value.delete(channelId);
         }
     };
 
@@ -294,14 +322,30 @@ export const useChatStore = defineStore('chat', () => {
             console.error('❌ Error de conexión al socket:', error.message);
         });
 
-        socket.value.on('new_message', (message: ChatMessage) => {
+        socket.value.on('new_message', (message: ChatMessage & { clientNonce?: string }) => {
             console.log('[SOCKET] new_message recibido:', message);
             const authStore2 = useAuthStore();
 
             // Append to the channel's cache entry if we have one (active or not).
             // The computed `messages` reflects this for the active channel.
-            // Guard by id so a redelivered event never duplicates a message.
             const cached = messageCache.value.get(message.channelId);
+
+            if (message.clientNonce) {
+                // Propio envío confirmado: reemplazar el eco optimista por el
+                // mensaje real (in-place, para no mover su posición/scroll).
+                // Late acks que ya fallaron por timeout también se curan acá.
+                pendingSends.delete(message.clientNonce);
+                if (cached) {
+                    const i = cached.findIndex(m => m.id === `pending-${message.clientNonce}`);
+                    if (i !== -1) {
+                        if (cached.some(m => m.id === message.id)) cached.splice(i, 1);
+                        else cached.splice(i, 1, message);
+                    }
+                }
+            }
+
+            // Guard by id so a redelivered event (or one already merged above)
+            // never duplicates a message.
             if (cached && !cached.some(m => m.id === message.id)) {
                 cached.push(message);
             }
@@ -686,6 +730,19 @@ export const useChatStore = defineStore('chat', () => {
         useCommunityStore().clearChannelUnread(channelId);
     };
 
+    // Un envío que ni siquiera obtuvo un ack a tiempo (desconexión, etc.):
+    // apaga el "pending" del eco y lo marca como fallido.
+    const markSendFailed = (nonce: string) => {
+        const pend = pendingSends.get(nonce);
+        if (!pend) return; // ya reconciliado por new_message
+        pendingSends.delete(nonce);
+        const msg = messageCache.value.get(pend.channelId)?.find(m => m.id === `pending-${nonce}`);
+        if (msg) {
+            msg.pending = false;
+            msg.failed = true;
+        }
+    };
+
     const sendMessage = (content: string, attachments?: Array<{
         objectKey: string;
         cdnUrl: string;
@@ -697,11 +754,45 @@ export const useChatStore = defineStore('chat', () => {
         if (!socket.value || !activeChannelId.value) return;
         if (!content.trim() && (!attachments || attachments.length === 0)) return;
 
-        socket.value.emit('send_message', {
-            channelId: activeChannelId.value,
-            content: content.trim(),
-            attachments: attachments || []
-        });
+        const channelId = activeChannelId.value; // capturado ya: puede cambiar de canal antes del ack
+        const me = useAuthStore().user;
+        const clientNonce = crypto.randomUUID();
+
+        if (me) {
+            // Eco optimista: aparece de inmediato, se reconcilia con el mensaje
+            // real (o se marca fallido) cuando responde el servidor.
+            const optimistic: ChatMessage = {
+                id: `pending-${clientNonce}`,
+                content: escapeLikeServer(content.trim()),
+                userId: me.id,
+                channelId,
+                createdAt: new Date().toISOString(),
+                pending: true,
+                attachments: (attachments ?? []).map((a, i) => ({
+                    id: `pending-${clientNonce}-att-${i}`,
+                    type: (['image', 'video', 'audio', 'file'].includes(a.type) ? a.type : 'file') as MessageAttachment['type'],
+                    url: a.cdnUrl,
+                    name: a.name,
+                    size: a.size,
+                    mimeType: a.mimeType,
+                })),
+                user: { id: me.id, username: me.username, avatarUrl: me.avatarUrl, status: me.status },
+            };
+            const cached = messageCache.value.get(channelId);
+            if (cached) cached.push(optimistic);
+            else touchCacheEntry(channelId, [optimistic]);
+            pendingSends.set(clientNonce, { channelId });
+        }
+
+        socket.value.timeout(10000).emit(
+            'send_message',
+            { channelId, content: content.trim(), attachments: attachments || [], clientNonce },
+            (err: Error | null, res?: { ok: boolean }) => {
+                if (!pendingSends.has(clientNonce)) return; // ya reconciliado por new_message
+                if (err || !res?.ok) markSendFailed(clientNonce);
+                // res.ok === true: no hacer nada — el evento new_message hace el swap.
+            }
+        );
 
         // Update last message for active DM
         if (activeDMUser.value) {
@@ -884,6 +975,15 @@ export const useChatStore = defineStore('chat', () => {
     // Pending attachments for upload
     const pendingAttachments = ref<PendingAttachment[]>([]);
 
+    // Mutates an attachment through the reactive array (by id) instead of a
+    // detached object reference, so Vue's Proxy set trap actually fires and
+    // the UI (MessageInput's v-for, canSend) picks up the change. Mutating a
+    // raw closure variable after push() is invisible to Vue's reactivity.
+    function updateAttachment(id: string, patch: Partial<PendingAttachment>) {
+        const target = pendingAttachments.value.find(a => a.id === id);
+        if (target) Object.assign(target, patch);
+    }
+
     async function uploadFile(file: File): Promise<PendingAttachment> {
         const id = crypto.randomUUID();
         const type = getFileType(file);
@@ -897,45 +997,58 @@ export const useChatStore = defineStore('chat', () => {
 
         pendingAttachments.value.push(attachment);
 
-        // Request presigned URL from upload worker
-        const authStore = useAuthStore();
-        const response = await fetch(`${UPLOAD_URL}/api/upload/presign`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-User-ID': authStore.user?.id ?? ''
-            },
-            body: JSON.stringify({
-                fileName: file.name,
-                fileSize: file.size,
-                mimeType: file.type
-            })
-        });
+        try {
+            // Request presigned URL from upload worker
+            const authStore = useAuthStore();
+            const response = await fetch(`${UPLOAD_URL}/api/upload/presign`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-ID': authStore.user?.id ?? ''
+                },
+                body: JSON.stringify({
+                    fileName: file.name,
+                    fileSize: file.size,
+                    mimeType: file.type
+                })
+            });
 
-        if (!response.ok) {
-            attachment.status = 'error';
-            attachment.error = 'Failed to get upload URL';
-            throw new Error('Failed to get upload URL');
-        }
-
-        const { uploadUrl, objectKey, cdnUrl } = await response.json();
-        attachment.uploadUrl = uploadUrl;
-        attachment.objectKey = objectKey;
-        attachment.cdnUrl = cdnUrl;
-
-        // Upload file directly to presigned URL
-        attachment.status = 'uploading';
-
-        await fetch(uploadUrl, {
-            method: 'PUT',
-            body: file,
-            headers: {
-                'Content-Type': file.type
+            if (!response.ok) {
+                const message = await response.json().then(body => body.error).catch(() => null);
+                updateAttachment(id, { status: 'error', error: message ?? 'Failed to get upload URL' });
+                throw new Error(message ?? 'Failed to get upload URL');
             }
-        });
 
-        attachment.status = 'completed';
-        return attachment;
+            const { uploadUrl, objectKey, cdnUrl } = await response.json();
+            updateAttachment(id, { uploadUrl, objectKey, cdnUrl, status: 'uploading' });
+
+            // Upload file directly to presigned URL
+            const uploadResponse = await fetch(uploadUrl, {
+                method: 'PUT',
+                body: file,
+                headers: {
+                    'Content-Type': file.type
+                }
+            });
+
+            if (!uploadResponse.ok) {
+                updateAttachment(id, { status: 'error', error: 'Upload failed' });
+                throw new Error('Upload failed');
+            }
+
+            updateAttachment(id, { status: 'completed' });
+            return attachment;
+        } catch (error) {
+            // A network-level failure (e.g. the upload worker unreachable) throws
+            // before either branch above runs, leaving the attachment stuck at
+            // 'pending'/'uploading' forever with no error surfaced. Catch-all so
+            // the UI always resolves to a visible state instead of hanging.
+            const current = pendingAttachments.value.find(a => a.id === id);
+            if (current && current.status !== 'error') {
+                updateAttachment(id, { status: 'error', error: 'Network error while uploading' });
+            }
+            throw error;
+        }
     }
 
     function getFileType(file: File): 'image' | 'video' | 'audio' | 'file' {

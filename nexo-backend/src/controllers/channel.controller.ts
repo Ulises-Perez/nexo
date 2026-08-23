@@ -46,9 +46,16 @@ export class ChannelController {
             // así que se invierte la página descendente a orden ascendente.
             messages.reverse();
 
-            // Mark messages as read (messages not sent by current user that are unread)
+            // El color de rol del autor se resuelve en el cliente vía
+            // communityStore.getMemberRoleColor; no se consulta aquí para
+            // evitar dos queries adicionales en la ruta más caliente.
+            res.status(200).json(messages);
+
+            // Mark messages as read (messages not sent by current user that are unread).
+            // Fire-and-forget, off the critical path — the response is already sent,
+            // so this write no longer adds latency to every fetch/revalidate poll.
             if (userId) {
-                await prisma.message.updateMany({
+                prisma.message.updateMany({
                     where: {
                         channelId,
                         userId: { not: userId },
@@ -57,13 +64,8 @@ export class ChannelController {
                     data: {
                         readAt: new Date()
                     }
-                });
+                }).catch(err => console.error('[ChannelController - getMessages markRead Error]', err));
             }
-
-            // El color de rol del autor se resuelve en el cliente vía
-            // communityStore.getMemberRoleColor; no se consulta aquí para
-            // evitar dos queries adicionales en la ruta más caliente.
-            res.status(200).json(messages);
         } catch (error) {
             console.error('[ChannelController - getMessages Error]', error);
             res.status(500).json({ error: 'Internal Server Error' });

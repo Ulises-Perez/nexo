@@ -64,6 +64,39 @@ async function isUserMemberOfChannel(userId: string, channelId: string): Promise
     }
 }
 
+// Access-check + delivery target for send_message, collapsed into a single
+// query (vs. isUserMemberOfChannel's separate conversation lookup for DMs).
+type SendContext =
+    | { kind: 'dm'; userAId: string; userBId: string }
+    | { kind: 'community'; communityId: string };
+
+async function getChannelSendContext(userId: string, channelId: string): Promise<SendContext | null> {
+    const channel = await prisma.channel.findUnique({
+        where: { id: channelId },
+        select: {
+            type: true,
+            conversation: { select: { userAId: true, userBId: true } },
+            category: {
+                select: {
+                    communityId: true,
+                    community: { select: { members: { where: { userId }, select: { userId: true } } } }
+                }
+            }
+        }
+    });
+    if (!channel) return null;
+
+    if (channel.type === 'dm') {
+        const conv = channel.conversation;
+        if (!conv || (conv.userAId !== userId && conv.userBId !== userId)) return null;
+        return { kind: 'dm', userAId: conv.userAId, userBId: conv.userBId };
+    }
+
+    const communityId = channel.category?.communityId;
+    if (!communityId || (channel.category?.community?.members?.length ?? 0) === 0) return null;
+    return { kind: 'community', communityId };
+}
+
 const updateUserStatus = async (userId: string, status: string) => {
     await prisma.user.update({
         where: { id: userId },
@@ -134,32 +167,6 @@ const emitToChannelMembers = async (io: Server, channelId: string, event: string
     io.to(channelId).emit(event, payload);
 };
 
-// Entrega un mensaje NUEVO al público correcto. En DMs va a las salas
-// personales de ambos participantes. En canales de comunidad, el contenido va
-// a la sala del canal (quienes lo están viendo) y, además, se notifica a toda
-// la comunidad con un evento SIN contenido (`channel_unread`) para que los
-// miembros que NO tienen el canal abierto incrementen su contador de no leídos.
-const deliverNewMessage = async (io: Server, channelId: string, message: unknown, senderId: string) => {
-    const conversation = await prisma.conversation.findUnique({
-        where: { channelId },
-        select: { userAId: true, userBId: true },
-    });
-    if (conversation) {
-        io.to(`user:${conversation.userAId}`).emit('new_message', message);
-        io.to(`user:${conversation.userBId}`).emit('new_message', message);
-        return;
-    }
-    // Canal de comunidad: el contenido va a la sala del canal (quienes lo
-    // están viendo); además se notifica a toda la comunidad para que los
-    // miembros que NO lo tienen abierto incrementen su contador de no leídos.
-    // Se incluye senderId para que el autor no sume no leídos en sus otras pestañas.
-    io.to(channelId).emit('new_message', message);
-    const communityId = await getCommunityIdOfChannel(channelId);
-    if (communityId) {
-        io.to(`community:${communityId}`).emit('channel_unread', { channelId, communityId, senderId });
-    }
-};
-
 // Emite el estado actual de un canal de voz a la sala de su comunidad
 const emitVoiceStateUpdate = async (io: Server, channelId: string) => {
     const communityId = await getCommunityIdOfChannel(channelId);
@@ -227,19 +234,33 @@ export const setupSockets = (io: Server) => {
             console.log(`[Socket.io] User ${userId} abandonó el canal: ${channelId}`);
         });
 
-        socket.on('send_message', async (data: { channelId: string; content: string; attachments?: Array<{ objectKey: string; cdnUrl: string; name: string; size: number; mimeType: string; type: string }> }) => {
+        socket.on('send_message', async (
+            data: { channelId: string; content: string; attachments?: Array<{ objectKey: string; cdnUrl: string; name: string; size: number; mimeType: string; type: string }>; clientNonce?: string },
+            ack?: (res: { ok: boolean; messageId?: string }) => void
+        ) => {
+            // Older clients don't pass an ack callback; guard against double-ack
+            // between the success path and the catch block below.
+            let acked = false;
+            const respond = (res: { ok: boolean; messageId?: string }) => {
+                if (acked) return;
+                acked = true;
+                ack?.(res);
+            };
+
             try {
                 const { channelId, content, attachments } = data;
 
                 if (!channelId || (!content && (!attachments || attachments.length === 0))) {
                     console.log(`[Socket.io] send_message cancelado: datos vacíos`);
+                    respond({ ok: false });
                     return;
                 }
 
-                // Verificar acceso al canal
-                const hasAccess = await isUserMemberOfChannel(userId, channelId);
-                if (!hasAccess) {
+                // Verificar acceso al canal y obtener el público de entrega en una sola query.
+                const ctx = await getChannelSendContext(userId, channelId);
+                if (!ctx) {
                     console.log(`[Socket.io] User ${userId} intentó enviar mensaje a canal no autorizado: ${channelId}`);
+                    respond({ ok: false });
                     return;
                 }
 
@@ -266,20 +287,39 @@ export const setupSockets = (io: Server) => {
                     }
                 });
 
-                // Si el canal es un DM, reaparece para quien lo hubiese ocultado.
-                // updateMany es un no-op en canales de comunidad (ninguna Conversation coincide).
-                await prisma.conversation.updateMany({
-                    where: { channelId },
-                    data: { hiddenForA: false, hiddenForB: false }
-                });
+                // Persistido: la subida termina acá. Fallas de entrega en tiempo real
+                // (broadcast) no deben tumbar el ack.
+                respond({ ok: true, messageId: newMessage.id });
+
+                if (ctx.kind === 'dm') {
+                    // Reaparece la conversación para quien la hubiese ocultado.
+                    await prisma.conversation.updateMany({
+                        where: { channelId },
+                        data: { hiddenForA: false, hiddenForB: false }
+                    });
+                }
+
+                // clientNonce se refleja tal cual a todos los clientes (incluido el
+                // emisor) para que puedan reconciliar su eco optimista — no se persiste.
+                const nonce = typeof data.clientNonce === 'string' && data.clientNonce.length <= 64
+                    ? data.clientNonce
+                    : undefined;
+                const payload = nonce ? { ...newMessage, clientNonce: nonce } : newMessage;
 
                 // El color de rol se resuelve en el cliente vía
                 // communityStore.getMemberRoleColor; no se adjunta aquí
                 // para evitar dos queries por mensaje en la ruta más caliente.
-                await deliverNewMessage(io, channelId, newMessage, userId);
+                if (ctx.kind === 'dm') {
+                    io.to(`user:${ctx.userAId}`).emit('new_message', payload);
+                    io.to(`user:${ctx.userBId}`).emit('new_message', payload);
+                } else {
+                    io.to(channelId).emit('new_message', payload);
+                    io.to(`community:${ctx.communityId}`).emit('channel_unread', { channelId, communityId: ctx.communityId, senderId: userId });
+                }
 
             } catch (error) {
                 console.error('[Socket.io] Error guardando mensaje:', error);
+                respond({ ok: false });
             }
         });
 

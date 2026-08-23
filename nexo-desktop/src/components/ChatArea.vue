@@ -98,6 +98,11 @@
         <p class="text-[14px] text-gray-600 font-medium">Selecciona un canal para empezar a chatear</p>
       </div>
 
+      <!-- Loading: first page for this channel still in flight -->
+      <div v-else-if="chatStore.isLoadingHistory && messages.length === 0" class="flex flex-col items-center justify-center h-full">
+        <div class="w-8 h-8 border-2 border-white/10 border-t-indigo-400 rounded-full animate-spin"></div>
+      </div>
+
       <!-- Empty state: no messages -->
       <div v-else-if="messages.length === 0" class="flex flex-col items-center justify-center h-full">
         <div class="w-20 h-20 mb-5 rounded-3xl bg-white/[0.03] flex items-center justify-center">

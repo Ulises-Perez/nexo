@@ -19,7 +19,8 @@
         :class="[
           index > 0 && messages[index - 1].userId === msg.userId && isSameDay(msg.createdAt, messages[index - 1].createdAt) && !isTimeDiffLarge(msg.createdAt, messages[index - 1].createdAt)
             ? ''
-            : 'mt-3'
+            : 'mt-3',
+          (msg.pending || msg.failed) ? 'opacity-60' : ''
         ]"
       >
         <!-- Hover timestamp (compact, single line) -->
@@ -88,6 +89,7 @@
               :attachments="msg.attachments"
             />
             <span v-if="msg.isEdited" class="text-[10px] text-gray-600 select-none ml-1">(editado)</span>
+            <p v-if="msg.failed" class="text-[11px] text-red-400 mt-0.5">No se pudo enviar este mensaje</p>
           </template>
         </div>
 
@@ -148,6 +150,8 @@ interface Message {
   isEdited?: boolean;
   user?: MessageUser;
   attachments?: MessageAttachment[];
+  pending?: boolean;
+  failed?: boolean;
 }
 
 defineProps<{
@@ -174,8 +178,10 @@ const canModerate = computed(() => {
   return communityStore.can(Permissions.MANAGE_MESSAGES);
 });
 
-const canEdit = (msg: Message) => msg.userId === authStore.user?.id;
-const canDelete = (msg: Message) => msg.userId === authStore.user?.id || canModerate.value;
+// Un mensaje pending/failed todavía no existe en el backend con un id real:
+// editar/borrar sobre un id temporal no haría nada.
+const canEdit = (msg: Message) => !msg.pending && !msg.failed && msg.userId === authStore.user?.id;
+const canDelete = (msg: Message) => !msg.pending && !msg.failed && (msg.userId === authStore.user?.id || canModerate.value);
 
 // El contenido llega con entidades HTML escapadas; decodificar para editar
 const decodeEntities = (text: string): string => {

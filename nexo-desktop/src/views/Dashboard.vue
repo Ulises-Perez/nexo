@@ -400,8 +400,10 @@ onMounted(async () => {
   if (chatStore.socket) {
     voiceStore.bindSocket(chatStore.socket as unknown as Socket);
   }
-  await communityStore.fetchCommunities();
-  await chatStore.fetchDMConversations();
+  await Promise.all([
+    communityStore.fetchCommunities(),
+    chatStore.fetchDMConversations(),
+  ]);
 });
 
 onUnmounted(() => {
