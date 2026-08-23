@@ -20,7 +20,7 @@
           index > 0 && messages[index - 1].userId === msg.userId && isSameDay(msg.createdAt, messages[index - 1].createdAt) && !isTimeDiffLarge(msg.createdAt, messages[index - 1].createdAt)
             ? ''
             : 'mt-3',
-          (msg.pending || msg.failed) ? 'opacity-60' : ''
+          msg.failed ? 'opacity-60' : ''
         ]"
       >
         <!-- Hover timestamp (compact, single line) -->

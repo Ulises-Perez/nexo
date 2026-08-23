@@ -70,7 +70,20 @@ type SendContext =
     | { kind: 'dm'; userAId: string; userBId: string }
     | { kind: 'community'; communityId: string };
 
+// This runs on every single message send — the hottest path in the app — so a
+// valid result is cached briefly in memory to skip the DB round trip on
+// consecutive sends. Only VALID contexts are cached (never null/denied), so
+// someone freshly added to a channel isn't stuck failing for the TTL window.
+// Trade-off: someone removed from a channel can still send for up to
+// SEND_CONTEXT_TTL_MS afterwards.
+const sendContextCache = new Map<string, { ctx: SendContext; expiresAt: number }>();
+const SEND_CONTEXT_TTL_MS = 30_000;
+
 async function getChannelSendContext(userId: string, channelId: string): Promise<SendContext | null> {
+    const cacheKey = `${userId}:${channelId}`;
+    const cached = sendContextCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.ctx;
+
     const channel = await prisma.channel.findUnique({
         where: { id: channelId },
         select: {
@@ -86,15 +99,21 @@ async function getChannelSendContext(userId: string, channelId: string): Promise
     });
     if (!channel) return null;
 
+    let ctx: SendContext | null = null;
     if (channel.type === 'dm') {
         const conv = channel.conversation;
-        if (!conv || (conv.userAId !== userId && conv.userBId !== userId)) return null;
-        return { kind: 'dm', userAId: conv.userAId, userBId: conv.userBId };
+        if (conv && (conv.userAId === userId || conv.userBId === userId)) {
+            ctx = { kind: 'dm', userAId: conv.userAId, userBId: conv.userBId };
+        }
+    } else {
+        const communityId = channel.category?.communityId;
+        if (communityId && (channel.category?.community?.members?.length ?? 0) > 0) {
+            ctx = { kind: 'community', communityId };
+        }
     }
 
-    const communityId = channel.category?.communityId;
-    if (!communityId || (channel.category?.community?.members?.length ?? 0) === 0) return null;
-    return { kind: 'community', communityId };
+    if (ctx) sendContextCache.set(cacheKey, { ctx, expiresAt: Date.now() + SEND_CONTEXT_TTL_MS });
+    return ctx;
 }
 
 const updateUserStatus = async (userId: string, status: string) => {
