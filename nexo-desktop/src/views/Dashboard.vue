@@ -124,11 +124,12 @@
       @close="showUserPanel = false"
     />
 
-    <!-- Create Community Modal -->
+    <!-- Create/Join Community Modal -->
     <CreateCommunityModal
       :show="showCreateModal"
       @cancel="showCreateModal = false"
       @created="handleCommunityCreated"
+      @join="handleJoinByCode"
     />
 
     <!-- Create Channel Modal -->
@@ -306,6 +307,11 @@ const handleCommunityCreated = async (communityId: string) => {
   await selectCommunity(communityId);
 };
 
+const handleJoinByCode = (code: string) => {
+  showCreateModal.value = false;
+  router.push(`/invite/${code}`);
+};
+
 const toggleCommunityDropdown = (id: string) => {
   if (activeDropdownId.value === id) {
     activeDropdownId.value = null;
@@ -318,13 +324,12 @@ const generateAndCopyInvite = async (communityId: string) => {
   activeDropdownId.value = null;
   const code = await communityStore.generateInviteCode(communityId);
   if (code) {
-    const inviteLink = `${window.location.origin}/invite/${code}`;
     try {
-      await navigator.clipboard.writeText(inviteLink);
-      alert('¡Enlace de invitación copiado al portapapeles!\n\n' + inviteLink);
+      await navigator.clipboard.writeText(code);
+      alert('¡Código de invitación copiado al portapapeles!\n\n' + code + '\n\nCompartilo con quien quieras invitar: lo pega en "Añadir un servidor" → "Unirse".');
     } catch (err) {
       console.error('Error al copiar al portapapeles:', err);
-      prompt('Presiona Ctrl+C para copiar tu enlace de invitación:', inviteLink);
+      prompt('Presiona Ctrl+C para copiar tu código de invitación:', code);
     }
   } else {
     alert('Hubo un error al generar la invitación.');
