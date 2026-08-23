@@ -15,8 +15,11 @@ export function generateObjectKey(fileName: string): string {
   return `attachments/${year}/${month}/${random}-${safeName}`;
 }
 
+const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+
 export async function generatePresignedUrl(
-  env: { ASSETS: R2Bucket },
+  env: { ASSETS: R2Bucket; CDN_URL: string },
+  origin: string,
   objectKey: string,
   fileSize: number,
   mimeType: string
@@ -33,11 +36,18 @@ export async function generatePresignedUrl(
     expiresAt: expiresAt.toISOString()
   }));
 
-  // URL para subir directamente al Worker
-  const uploadUrl = `https://nexo-upload-worker.devk.workers.dev/api/upload/${uploadToken}`;
+  // URL para subir directamente al Worker que sirvió este presign (local o
+  // producción) — el token solo existe en el R2 de ese mismo entorno, así
+  // que la URL de subida no puede apuntar a un origin distinto.
+  const uploadUrl = `${origin}/api/upload/${uploadToken}`;
 
-  // URL CDN para acceder al archivo
-  const cdnUrl = `https://pub-be485944060140659115bf903d1bf6ca.r2.dev/${objectKey}`;
+  // URL CDN para acceder al archivo. El dominio público de R2 (env.CDN_URL)
+  // solo sirve el bucket real de producción — un archivo subido contra el
+  // Worker local vive únicamente en su R2 simulado, así que en ese caso lo
+  // servimos a través del propio Worker en vez del CDN público.
+  const cdnUrl = LOCAL_ORIGIN.test(origin)
+    ? `${origin}/api/upload/cdn/${objectKey}`
+    : `${env.CDN_URL}/${objectKey}`;
 
   return {
     uploadUrl,

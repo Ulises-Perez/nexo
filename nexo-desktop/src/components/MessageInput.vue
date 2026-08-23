@@ -86,6 +86,21 @@
           >
             <div class="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
           </div>
+
+          <!-- Upload status label: shows exactly where an attachment is stuck -->
+          <p
+            class="text-[10px] text-center mt-0.5 max-w-[128px] truncate"
+            :class="{
+              'text-indigo-400': attachment.status === 'pending' || attachment.status === 'uploading',
+              'text-red-400': attachment.status === 'error',
+              'text-emerald-400': attachment.status === 'completed'
+            }"
+          >
+            <template v-if="attachment.status === 'pending'">Preparando…</template>
+            <template v-else-if="attachment.status === 'uploading'">Subiendo…</template>
+            <template v-else-if="attachment.status === 'error'">{{ attachment.error || 'Error al subir' }}</template>
+            <template v-else>Listo ✓</template>
+          </p>
         </div>
       </div>
 
@@ -152,6 +167,7 @@ interface PendingAttachment {
   status: 'pending' | 'uploading' | 'completed' | 'error';
   objectKey?: string;
   cdnUrl?: string;
+  error?: string;
 }
 
 const props = defineProps<{
@@ -175,32 +191,24 @@ const localMessage = ref('');
 const canSend = computed(() => {
   const hasContent = localMessage.value.trim().length > 0;
   const hasCompletedAttachments = props.pendingAttachments.some(a => a.status === 'completed');
-  const hasPendingAttachments = props.pendingAttachments.some(a => a.status === 'pending');
-  return (hasContent || hasCompletedAttachments || hasPendingAttachments) && props.isInputEnabled;
+  const hasAttachmentsInFlight = props.pendingAttachments.some(a => a.status === 'pending' || a.status === 'uploading');
+  if (hasAttachmentsInFlight) return false;
+  return (hasContent || hasCompletedAttachments) && props.isInputEnabled;
 });
 
 const getPreviewUrl = (file: File): string => {
   return window.URL.createObjectURL(file);
 };
 
-const handleSubmit = async () => {
+const handleSubmit = () => {
   const content = localMessage.value.trim();
-  const hasPending = props.pendingAttachments.some(a => a.status === 'pending');
+  // Attachments upload automatically on select/drop (handleFileSelect,
+  // handleDrop). While one is still 'pending' or 'uploading', canSend keeps
+  // the submit button disabled, so this only needs to gather what's ready.
   const hasCompleted = props.pendingAttachments.some(a => a.status === 'completed');
 
-  if (!content && !hasPending && !hasCompleted) {
+  if (!content && !hasCompleted) {
     return;
-  }
-
-  // Upload any pending attachments first
-  const pending = props.pendingAttachments.filter(a => a.status === 'pending');
-  for (const att of pending) {
-    try {
-      await emit('upload', att.file);
-    } catch (error) {
-      console.error('Upload failed:', error);
-      return;
-    }
   }
 
   // Get all completed attachments

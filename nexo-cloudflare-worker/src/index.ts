@@ -3,6 +3,7 @@ import { generateObjectKey, generatePresignedUrl } from './presign';
 
 interface Env {
   ASSETS: R2Bucket;
+  CDN_URL: string;
 }
 
 const RATE_LIMIT = 50; // requests per minute
@@ -74,7 +75,8 @@ async function handlePresign(request: Request, env: Env): Promise<Response> {
   const objectKey = generateObjectKey(fileName);
 
   // Generate presigned URL
-  const presigned = await generatePresignedUrl(env, objectKey, fileSize, mimeType);
+  const origin = new URL(request.url).origin;
+  const presigned = await generatePresignedUrl(env, origin, objectKey, fileSize, mimeType);
 
   return new Response(JSON.stringify({
     ...presigned,
@@ -135,6 +137,24 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// Serves an object straight from R2 — only reachable in local dev, where
+// env.CDN_URL's public bucket domain can't see the locally-simulated R2
+// storage a local upload actually lands in (see generatePresignedUrl).
+async function handleCdnServe(request: Request, env: Env): Promise<Response> {
+  const objectKey = new URL(request.url).pathname.replace('/api/upload/cdn/', '');
+  const object = await env.ASSETS.get(objectKey);
+
+  if (!object) {
+    return new Response('Not Found', { status: 404, headers: corsHeaders });
+  }
+
+  const headers = new Headers(corsHeaders);
+  object.writeHttpMetadata(headers);
+  headers.set('etag', object.httpEtag);
+
+  return new Response(object.body, { headers });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -147,6 +167,11 @@ export default {
     // Handle presign endpoint
     if (url.pathname === '/api/upload/presign' && request.method === 'POST') {
       return handlePresign(request, env);
+    }
+
+    // Serve an object directly (local dev only — see handleCdnServe)
+    if (url.pathname.startsWith('/api/upload/cdn/') && request.method === 'GET') {
+      return handleCdnServe(request, env);
     }
 
     // Handle upload endpoint (PUT with token)
