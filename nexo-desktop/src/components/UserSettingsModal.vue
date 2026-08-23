@@ -185,6 +185,30 @@
 
         <div class="h-px bg-white/[0.06] mb-5"></div>
 
+        <!-- Voz y Video -->
+        <section class="mb-5">
+          <h3 class="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3">Voz y Video</h3>
+          <p class="text-[12px] text-gray-500 mb-2.5">
+            Si bloqueaste el permiso del micrófono por error y ya no te lo vuelve a pedir, restablecelo acá.
+          </p>
+          <button
+            type="button"
+            @click="resetMicPermission"
+            :disabled="isResettingMic"
+            class="flex items-center gap-2 bg-[#1E1F22] hover:bg-[#26272b] text-gray-200 text-[13px] font-medium px-3.5 py-2 rounded-lg transition-colors disabled:opacity-50"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {{ isResettingMic ? 'Restableciendo...' : 'Restablecer permiso del micrófono' }}
+          </button>
+          <p v-if="micResetMessage" class="text-[12px] mt-2" :class="micResetError ? 'text-red-400' : 'text-emerald-400'">
+            {{ micResetMessage }}
+          </p>
+        </section>
+
+        <div class="h-px bg-white/[0.06] mb-5"></div>
+
         <!-- Conexiones -->
         <section class="mb-3">
           <div class="flex items-center justify-between mb-3">
@@ -277,6 +301,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useAuthStore } from '../stores/auth';
 import type { UserConnection } from '../stores/auth';
 import { useChatStore } from '../stores/chat';
@@ -323,9 +348,27 @@ const newConnection = ref<{ platform: string; name: string; url: string }>({
 const isLoading = ref(false);
 const isUploadingBanner = ref(false);
 const isAddingConnection = ref(false);
+const isResettingMic = ref(false);
 const errorMessage = ref('');
 const connectionError = ref('');
+const micResetMessage = ref('');
+const micResetError = ref(false);
 const bannerFileInput = ref<HTMLInputElement | null>(null);
+
+const resetMicPermission = async () => {
+  isResettingMic.value = true;
+  micResetMessage.value = '';
+  try {
+    await invoke('reset_media_permissions', { origin: window.location.origin });
+    micResetError.value = false;
+    micResetMessage.value = 'Listo. La próxima vez que entres a un canal de voz te va a volver a pedir el permiso.';
+  } catch (err: any) {
+    micResetError.value = true;
+    micResetMessage.value = typeof err === 'string' ? err : 'No se pudo restablecer el permiso.';
+  } finally {
+    isResettingMic.value = false;
+  }
+};
 
 const bioCount = computed(() => form.value.bio.length);
 
