@@ -1,7 +1,5 @@
 # Nexo
 
-> A self-hosted, Discord-style chat platform — communities, channels, direct messages, friends, and real-time messaging with file sharing.
-
 Nexo is a personal project built as a monorepo with three independent parts: a **REST + WebSocket API**, a **cross-platform desktop client**, and a **Cloudflare Worker** that handles file uploads to object storage.
 
 > [!IMPORTANT]
