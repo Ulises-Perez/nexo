@@ -5,6 +5,8 @@ export interface VoiceParticipant {
     username: string;
     avatarUrl: string | null;
     muted: boolean;
+    sharing: boolean;
+    shareId: string | null;
 }
 
 const voiceChannels = new Map<string, Map<string, VoiceParticipant>>();
@@ -40,6 +42,14 @@ export function findVoiceChannelOfSocket(socketId: string): string | null {
 export function setParticipantMuted(channelId: string, socketId: string, muted: boolean) {
     const participant = voiceChannels.get(channelId)?.get(socketId);
     if (participant) participant.muted = muted;
+}
+
+export function setParticipantSharing(channelId: string, socketId: string, sharing: boolean, shareId: string | null) {
+    const participant = voiceChannels.get(channelId)?.get(socketId);
+    if (participant) {
+        participant.sharing = sharing;
+        participant.shareId = shareId;
+    }
 }
 
 // Devuelve el estado de voz de varios canales: { channelId: participantes[] }

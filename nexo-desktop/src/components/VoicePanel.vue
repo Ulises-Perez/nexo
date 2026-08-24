@@ -41,6 +41,18 @@
       </svg>
     </button>
 
+    <!-- Compartir pantalla -->
+    <button
+      @click="toggleShare"
+      class="p-1.5 rounded-lg transition-colors"
+      :class="screenShareStore.isSharing ? 'text-emerald-400 bg-emerald-500/10' : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'"
+      :title="screenShareStore.isSharing ? 'Dejar de compartir pantalla' : 'Compartir pantalla'"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-4.5 w-4.5" width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+      </svg>
+    </button>
+
     <!-- Disconnect -->
     <button
       @click="voiceStore.leaveVoice()"
@@ -58,9 +70,19 @@
 import { computed } from 'vue';
 import { useVoiceStore } from '../stores/voice';
 import { useCommunityStore } from '../stores/community';
+import { useScreenShareStore } from '../stores/screenShare';
 
 const voiceStore = useVoiceStore();
 const communityStore = useCommunityStore();
+const screenShareStore = useScreenShareStore();
+
+const toggleShare = () => {
+  if (screenShareStore.isSharing) {
+    screenShareStore.stopSharing();
+  } else {
+    screenShareStore.showQualityPicker = true;
+  }
+};
 
 const channelName = computed(() => {
   const channelId = voiceStore.connectedChannelId;

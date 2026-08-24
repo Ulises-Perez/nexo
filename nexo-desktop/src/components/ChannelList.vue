@@ -107,6 +107,16 @@
               <svg v-if="participant.muted" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-red-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 5.586A2 2 0 005 7v4a7 7 0 0011.95 4.95M15 9.34V5a3 3 0 00-5.94-.6M12 18v4m0 0H8m4 0h4M3 3l18 18" />
               </svg>
+              <button
+                v-if="participant.sharing && participant.socketId !== voiceStore.ownSocketId()"
+                @click.stop="watchParticipant(participant)"
+                class="text-emerald-400 hover:text-emerald-300 flex-shrink-0"
+                title="Mirar transmisión"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+              </button>
             </li>
           </ul>
         </li>
@@ -135,6 +145,8 @@ import { ref, computed } from 'vue';
 import { useCommunityStore, Permissions } from '../stores/community';
 import type { Channel, Category } from '../stores/community';
 import { useVoiceStore } from '../stores/voice';
+import type { VoiceParticipant } from '../stores/voice';
+import { useScreenShareStore } from '../stores/screenShare';
 import { useUserProfileStore } from '../stores/userProfile';
 import UserAvatar from './UserAvatar.vue';
 import ChannelSettingsModal from './ChannelSettingsModal.vue';
@@ -153,6 +165,7 @@ const emit = defineEmits<{
 
 const communityStore = useCommunityStore();
 const voiceStore = useVoiceStore();
+const screenShareStore = useScreenShareStore();
 const profileStore = useUserProfileStore();
 
 const settingsChannel = ref<Channel | null>(null);
@@ -161,6 +174,11 @@ const settingsCategory = ref<Category | null>(null);
 const canManageChannels = computed(() => communityStore.can(Permissions.MANAGE_CHANNELS, props.communityId));
 
 const voiceParticipants = (channelId: string) => voiceStore.getParticipants(channelId);
+
+const watchParticipant = (participant: VoiceParticipant) => {
+  if (!participant.shareId) return;
+  screenShareStore.watchShare(participant.socketId, participant.shareId, participant.username);
+};
 
 const isChannelActive = (channel: Channel): boolean => {
   if (channel.type === 'voice') return voiceStore.connectedChannelId === channel.id;

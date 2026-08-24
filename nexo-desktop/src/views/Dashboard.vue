@@ -162,6 +162,11 @@
 
     <!-- User Settings Modal (global — launched from the panel and self-profile) -->
     <UserSettingsModal :show="userSettingsStore.isOpen" @close="userSettingsStore.close()" />
+
+    <!-- Screen Share (global) -->
+    <ScreenShareQualityModal />
+    <ScreenShareViewer />
+    <ScreenShareSelfPreview />
   </div>
 </template>
 
@@ -172,6 +177,7 @@ import { useAuthStore } from '../stores/auth';
 import { useChatStore } from '../stores/chat';
 import { useCommunityStore } from '../stores/community';
 import { useVoiceStore } from '../stores/voice';
+import { useScreenShareStore } from '../stores/screenShare';
 import type { Socket } from 'socket.io-client';
 import HomeMain from '../components/HomeMain.vue';
 import FriendRequests from '../components/FriendRequests.vue';
@@ -185,12 +191,16 @@ import CreateCategoryModal from '../components/CreateCategoryModal.vue';
 import CommunitySettingsModal from '../components/CommunitySettingsModal.vue';
 import UserProfileModal from '../components/UserProfileModal.vue';
 import UserSettingsModal from '../components/UserSettingsModal.vue';
+import ScreenShareQualityModal from '../components/ScreenShareQualityModal.vue';
+import ScreenShareViewer from '../components/ScreenShareViewer.vue';
+import ScreenShareSelfPreview from '../components/ScreenShareSelfPreview.vue';
 import { useUserSettingsStore } from '../stores/userSettings';
 
 const authStore = useAuthStore();
 const chatStore = useChatStore();
 const communityStore = useCommunityStore();
 const voiceStore = useVoiceStore();
+const screenShareStore = useScreenShareStore();
 const userSettingsStore = useUserSettingsStore();
 const router = useRouter();
 
@@ -399,6 +409,7 @@ onMounted(async () => {
   chatStore.connectSocket();
   if (chatStore.socket) {
     voiceStore.bindSocket(chatStore.socket as unknown as Socket);
+    screenShareStore.bindSocket(chatStore.socket as unknown as Socket);
 
     // Tras una reconexión, el roster de voz de la comunidad activa puede
     // haber quedado desactualizado (se perdieron los voice_state_update
@@ -419,6 +430,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  screenShareStore.unbindSocket();
   voiceStore.unbindSocket();
   chatStore.disconnectSocket();
 });

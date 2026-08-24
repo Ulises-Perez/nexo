@@ -8,9 +8,12 @@ export interface VoiceParticipant {
     username: string;
     avatarUrl: string | null;
     muted: boolean;
+    sharing: boolean;
+    shareId: string | null;
 }
 
-const RTC_CONFIG: RTCConfiguration = {
+// Compartido con screenShare.ts: misma config (solo STUN) para las conexiones de pantalla.
+export const RTC_CONFIG: RTCConfiguration = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
@@ -47,6 +50,8 @@ export const useVoiceStore = defineStore('voice', () => {
     const isSpeaking = (socketId: string): boolean => {
         return !!speaking.value[socketId];
     };
+
+    const ownSocketId = (): string | undefined => socket?.id;
 
     // ===================== Sonidos de conexión (WebAudio, sin assets) =====================
 
@@ -216,6 +221,10 @@ export const useVoiceStore = defineStore('voice', () => {
 
     const handleSignal = async (data: { from: string; userId: string; signal: any }) => {
         const { from, signal } = data;
+        // Las señales de screen share viajan por el mismo evento pero las
+        // maneja screenShare.ts en su propio listener — acá se ignoran para
+        // no enrutarlas por error a la conexión de audio de ese mismo peer.
+        if (signal?.kind === 'screen') return;
         try {
             let pc = peers.get(from);
 
@@ -401,6 +410,7 @@ export const useVoiceStore = defineStore('voice', () => {
         speaking,
         getParticipants,
         isSpeaking,
+        ownSocketId,
         bindSocket,
         unbindSocket,
         syncVoiceStates,

@@ -8,6 +8,7 @@ import {
     getVoiceParticipants,
     findVoiceChannelOfSocket,
     setParticipantMuted,
+    setParticipantSharing,
     getVoiceStates,
 } from './voiceState';
 
@@ -420,13 +421,16 @@ export const setupSockets = (io: Server) => {
 
                 const existingPeers = getVoiceParticipants(channelId);
 
-                addVoiceParticipant(channelId, {
+                const newParticipant = {
                     socketId: socket.id,
                     userId,
                     username: me?.username ?? 'Usuario',
                     avatarUrl: me?.avatarUrl ?? null,
                     muted: false,
-                });
+                    sharing: false,
+                    shareId: null,
+                };
+                addVoiceParticipant(channelId, newParticipant);
 
                 socket.join(`voice:${channelId}`);
 
@@ -436,13 +440,7 @@ export const setupSockets = (io: Server) => {
                 // Los demás se enteran del nuevo peer (esperan su oferta)
                 socket.to(`voice:${channelId}`).emit('voice_peer_joined', {
                     channelId,
-                    peer: {
-                        socketId: socket.id,
-                        userId,
-                        username: me?.username ?? 'Usuario',
-                        avatarUrl: me?.avatarUrl ?? null,
-                        muted: false,
-                    }
+                    peer: newParticipant,
                 });
 
                 await emitVoiceStateUpdate(io, channelId);
@@ -469,6 +467,20 @@ export const setupSockets = (io: Server) => {
             const channelId = findVoiceChannelOfSocket(socket.id);
             if (!channelId) return;
             setParticipantMuted(channelId, socket.id, !!data?.muted);
+            await emitVoiceStateUpdate(io, channelId);
+        });
+
+        socket.on('start_screen_share', async (data: { shareId: string }) => {
+            const channelId = findVoiceChannelOfSocket(socket.id);
+            if (!channelId || typeof data?.shareId !== 'string') return;
+            setParticipantSharing(channelId, socket.id, true, data.shareId);
+            await emitVoiceStateUpdate(io, channelId);
+        });
+
+        socket.on('stop_screen_share', async () => {
+            const channelId = findVoiceChannelOfSocket(socket.id);
+            if (!channelId) return;
+            setParticipantSharing(channelId, socket.id, false, null);
             await emitVoiceStateUpdate(io, channelId);
         });
 
