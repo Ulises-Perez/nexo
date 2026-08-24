@@ -87,7 +87,7 @@
             </span>
           </div>
           <p class="text-[12px] truncate" :class="chatStore.getUnreadCount(conv.friend.id) > 0 ? 'text-gray-300 font-medium' : 'text-gray-500'">
-            <span v-if="chatStore.getUnreadCount(conv.friend.id) > 0">{{ conv.friend.username }}: </span><span v-else-if="chatStore.getLastMessage(conv.friend.id)?.isMine">Tú: </span>{{ chatStore.getLastMessage(conv.friend.id)?.content || 'Sin mensajes' }}
+            <span v-if="chatStore.getUnreadCount(conv.friend.id) > 0">{{ conv.friend.username }}: </span><span v-else-if="chatStore.getLastMessage(conv.friend.id)?.isMine">Tú: </span>{{ chatStore.getLastMessage(conv.friend.id)?.content ? decodeHtmlEntities(chatStore.getLastMessage(conv.friend.id)!.content) : 'Sin mensajes' }}
           </p>
         </div>
 
@@ -111,6 +111,7 @@ import { useFriendsStore } from '../stores/friends';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
 import UserAvatar from './UserAvatar.vue';
+import { decodeHtmlEntities } from '../composables/decodeHtmlEntities';
 
 const authStore = useAuthStore();
 

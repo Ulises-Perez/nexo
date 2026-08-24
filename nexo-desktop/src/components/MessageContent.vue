@@ -4,7 +4,7 @@
     <p 
       v-if="content" 
       class="text-[14px] text-gray-300 leading-[1.375rem] break-words whitespace-pre-wrap"
-    >{{ content }}</p>
+    >{{ decodeHtmlEntities(content) }}</p>
 
     <!-- Attachments -->
     <div v-if="attachments && attachments.length > 0" class="mt-1.5 flex flex-col gap-1.5">
@@ -18,7 +18,7 @@
         >
           <img 
             :src="attachment.url" 
-            :alt="attachment.name || 'Imagen'"
+            :alt="attachment.name ? decodeHtmlEntities(attachment.name) : 'Imagen'"
             class="w-full h-auto max-h-[350px] object-cover rounded-xl transition-transform duration-200 group-hover:scale-[1.02]"
             loading="lazy"
           />
@@ -50,7 +50,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
-            <span v-if="attachment.name" class="text-[12px] text-gray-500 truncate">{{ attachment.name }}</span>
+            <span v-if="attachment.name" class="text-[12px] text-gray-500 truncate">{{ decodeHtmlEntities(attachment.name) }}</span>
             <span v-if="attachment.size" class="text-[11px] text-gray-600 ml-auto flex-shrink-0">{{ formatFileSize(attachment.size) }}</span>
           </div>
         </div>
@@ -77,7 +77,7 @@
 
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 mb-1.5">
-                <span v-if="attachment.name" class="text-[13px] text-gray-300 font-medium truncate">{{ attachment.name }}</span>
+                <span v-if="attachment.name" class="text-[13px] text-gray-300 font-medium truncate">{{ decodeHtmlEntities(attachment.name) }}</span>
                 <span v-else class="text-[13px] text-gray-400 font-medium">Audio</span>
               </div>
               <!-- Waveform / progress bar -->
@@ -117,7 +117,7 @@
             </svg>
           </div>
           <div class="flex-1 min-w-0">
-            <p class="text-[13px] text-indigo-400 font-medium truncate group-hover:underline">{{ attachment.name || 'Archivo' }}</p>
+            <p class="text-[13px] text-indigo-400 font-medium truncate group-hover:underline">{{ attachment.name ? decodeHtmlEntities(attachment.name) : 'Archivo' }}</p>
             <p v-if="attachment.size" class="text-[11px] text-gray-600 mt-0.5">{{ formatFileSize(attachment.size) }}</p>
           </div>
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-600 group-hover:text-gray-400 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -133,6 +133,7 @@
 <script setup lang="ts">
 import { reactive } from 'vue';
 import type { MessageAttachment } from '../stores/chat';
+import { decodeHtmlEntities } from '../composables/decodeHtmlEntities';
 
 defineProps<{
   content: string;

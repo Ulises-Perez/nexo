@@ -13,18 +13,6 @@ import {
 
 const userSockets = new Map<string, Set<string>>();
 
-// Sanitización básica de contenido para prevenir XSS
-function sanitizeContent(content: string): string {
-    if (!content) return '';
-    return content
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#x27;')
-        .replace(/\//g, '&#x2F;');
-}
-
 // Verificar si el usuario es miembro de la comunidad del canal
 async function isUserMemberOfChannel(userId: string, channelId: string): Promise<boolean> {
     try {
@@ -285,12 +273,12 @@ export const setupSockets = (io: Server) => {
 
                 const newMessage = await prisma.message.create({
                     data: {
-                        content: sanitizeContent(content || ''),
+                        content: content || '',
                         channelId,
                         userId,
                         attachments: attachments && attachments.length > 0 ? {
                             create: attachments.map(att => ({
-                                name: sanitizeContent(att.name),
+                                name: att.name,
                                 size: att.size,
                                 mimeType: att.mimeType,
                                 url: att.cdnUrl,
@@ -353,7 +341,7 @@ export const setupSockets = (io: Server) => {
 
                 const updated = await prisma.message.update({
                     where: { id: messageId },
-                    data: { content: sanitizeContent(content.trim()), isEdited: true },
+                    data: { content: content.trim(), isEdited: true },
                     include: {
                         user: {
                             select: { id: true, username: true, avatarUrl: true, status: true }

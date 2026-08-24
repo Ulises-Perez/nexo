@@ -132,6 +132,7 @@ import { useAuthStore } from '../stores/auth';
 import { useChatStore } from '../stores/chat';
 import { useCommunityStore, Permissions } from '../stores/community';
 import { useUserProfileStore } from '../stores/userProfile';
+import { decodeHtmlEntities } from '../composables/decodeHtmlEntities';
 import type { MessageAttachment } from '../stores/chat';
 
 interface MessageUser {
@@ -183,16 +184,9 @@ const canModerate = computed(() => {
 const canEdit = (msg: Message) => !msg.pending && !msg.failed && msg.userId === authStore.user?.id;
 const canDelete = (msg: Message) => !msg.pending && !msg.failed && (msg.userId === authStore.user?.id || canModerate.value);
 
-// El contenido llega con entidades HTML escapadas; decodificar para editar
-const decodeEntities = (text: string): string => {
-  const el = document.createElement('textarea');
-  el.innerHTML = text;
-  return el.value;
-};
-
 const startEdit = (msg: Message) => {
   editingId.value = msg.id;
-  editingContent.value = decodeEntities(msg.content);
+  editingContent.value = decodeHtmlEntities(msg.content);
   nextTick(() => {
     document.getElementById(`edit-input-${msg.id}`)?.focus();
   });
@@ -205,7 +199,7 @@ const cancelEdit = () => {
 
 const confirmEdit = (msg: Message) => {
   const content = editingContent.value.trim();
-  if (content && content !== decodeEntities(msg.content)) {
+  if (content && content !== decodeHtmlEntities(msg.content)) {
     chatStore.editMessage(msg.id, content);
   }
   cancelEdit();
