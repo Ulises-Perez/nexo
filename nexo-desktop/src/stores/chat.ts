@@ -6,6 +6,7 @@ import { useFriendsStore } from './friends';
 import { useCommunityStore } from './community';
 import { useVoiceStore } from './voice';
 import api from '../api/axios';
+import { hydrateCache, persistCache, MESSAGE_CACHE_KEY } from '../composables/persistedCache';
 
 export interface MessageAttachment {
     id: string;
@@ -90,10 +91,40 @@ export const useChatStore = defineStore('chat', () => {
     // touched channel is re-inserted at the end, so the first key is the LRU
     // eviction candidate. The active channel is never evicted.
     const MAX_CACHED_CHANNELS = 15;
-    const messageCache = ref<Map<string, ChatMessage[]>>(new Map());
+    // Arranque en frío: hidratar desde localStorage para tener algo que pintar
+    // antes de que resuelva cualquier request (ver persistedCache.ts).
+    // v2: v1 podía persistir ecos optimistas (pending/failed) sin resolver —
+    // al recargar quedaban zombis para siempre, sin ningún nonce vivo en
+    // pendingSends que los reconcilie. Se sube la versión para descartar
+    // cualquier cache v1 arrastrado por una instalación anterior.
+    const messageCache = ref<Map<string, ChatMessage[]>>(
+        new Map(hydrateCache<Array<[string, ChatMessage[]]>>(MESSAGE_CACHE_KEY, 2) ?? [])
+    );
 
     // Tamaño de página de mensajes (debe coincidir con el clamp del backend).
     const PAGE_SIZE = 50;
+
+    // Persistir el cache de mensajes es debounced (no write-through): el
+    // socket puede mutarlo varias veces por segundo y esto es una app de
+    // escritorio, no un browser limitado por batería — perder los últimos
+    // ~400ms ante un crash no importa porque todo revalida al reabrir.
+    let persistMessagesTimer: ReturnType<typeof setTimeout> | null = null;
+    const schedulePersistMessages = () => {
+        if (persistMessagesTimer) clearTimeout(persistMessagesTimer);
+        persistMessagesTimer = setTimeout(() => {
+            persistMessagesTimer = null;
+            // Solo la última página por canal: el historial más viejo paginado
+            // no vale la pena persistir, igual se recarga con loadOlderMessages.
+            // Los ecos optimistas (pending) o fallidos (failed) nunca se
+            // persisten: pendingSends es memoria pura y se reinicia en cada
+            // arranque, así que un pending hidratado jamás se reconciliaría.
+            const entries: Array<[string, ChatMessage[]]> = [];
+            messageCache.value.forEach((msgs, channelId) => {
+                entries.push([channelId, msgs.filter(m => !m.pending && !m.failed).slice(-PAGE_SIZE)]);
+            });
+            persistCache(MESSAGE_CACHE_KEY, 2, entries);
+        }, 400);
+    };
 
     // Por canal: ¿quedan mensajes más antiguos por cargar? Una página está
     // "llena" (puede haber más) cuando el server devolvió exactamente PAGE_SIZE.
@@ -108,16 +139,6 @@ export const useChatStore = defineStore('chat', () => {
     // como fallido) el eco local cuando llega el ack o el evento new_message.
     const pendingSends = new Map<string, { channelId: string }>();
 
-    // Espeja el sanitizado del backend (sockets/index.ts) para que el eco local
-    // no cambie de aspecto cuando se reemplaza por el mensaje real del servidor.
-    const escapeLikeServer = (s: string): string => s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#x27;')
-        .replace(/\//g, '&#x2F;');
-
     // Une dos listas de mensajes deduplicando por id y ordenando por createdAt asc.
     const mergeById = (a: ChatMessage[], b: ChatMessage[]): ChatMessage[] => {
         const byId = new Map<string, ChatMessage>();
@@ -127,6 +148,15 @@ export const useChatStore = defineStore('chat', () => {
             (x, y) => new Date(x.createdAt).getTime() - new Date(y.createdAt).getTime()
         );
     };
+
+    // Un eco optimista en vuelo tiene id sintético (`pending-<nonce>`) que
+    // nunca va a coincidir con el id real que asigna el servidor — el REST no
+    // conoce el clientNonce, solo viaja por socket y no se persiste. Si se lo
+    // deja pasar a un merge contra una página fresca del servidor, el mensaje
+    // real y su eco quedan como dos entradas distintas (duplicado visible solo
+    // para quien lo envió). Se excluye acá; su reconciliación la hace
+    // exclusivamente el evento new_message o el timeout del ack.
+    const withoutPendingEchoes = (list: ChatMessage[]): ChatMessage[] => list.filter(m => !m.pending);
 
     // The visible message list is derived from the active channel's cache entry.
     // When no channel is active (or it has no cache entry yet) the view is empty,
@@ -142,12 +172,14 @@ export const useChatStore = defineStore('chat', () => {
         messageCache.value.delete(channelId);
         messageCache.value.set(channelId, entry);
 
-        if (messageCache.value.size <= MAX_CACHED_CHANNELS) return;
-        for (const key of messageCache.value.keys()) {
-            if (messageCache.value.size <= MAX_CACHED_CHANNELS) break;
-            if (key === activeChannelId.value) continue;
-            messageCache.value.delete(key);
+        if (messageCache.value.size > MAX_CACHED_CHANNELS) {
+            for (const key of messageCache.value.keys()) {
+                if (messageCache.value.size <= MAX_CACHED_CHANNELS) break;
+                if (key === activeChannelId.value) continue;
+                messageCache.value.delete(key);
+            }
         }
+        schedulePersistMessages();
     };
     const activeDMUser = ref<DMFriend | null>(null);
     // Canales cuya primera página de mensajes está en vuelo. Por-canal (no un
@@ -237,7 +269,7 @@ export const useChatStore = defineStore('chat', () => {
             // Re-leer el cache DESPUÉS del await: un envío optimista pudo haberse
             // agregado mientras esta primera página estaba en vuelo. Sin este merge,
             // el fetch reemplazaría el array entero y borraría ese eco.
-            const existing = messageCache.value.get(channelId) ?? [];
+            const existing = withoutPendingEchoes(messageCache.value.get(channelId) ?? []);
             applyFetchedMessages(channelId, existing.length ? mergeById(existing, data) : data);
             hasMoreOlder.value.set(channelId, data.length === PAGE_SIZE);
         } catch (error: any) {
@@ -255,7 +287,7 @@ export const useChatStore = defineStore('chat', () => {
         try {
             const response = await api.get(`/channels/${channelId}/messages?limit=${PAGE_SIZE}`);
             const data = response.data as ChatMessage[];
-            const existing = messageCache.value.get(channelId) ?? [];
+            const existing = withoutPendingEchoes(messageCache.value.get(channelId) ?? []);
             const merged = mergeById(existing, data);
             applyFetchedMessages(channelId, merged);
             // Solo se reevalúa hasMoreOlder cuando no había nada cacheado; si ya
@@ -286,7 +318,7 @@ export const useChatStore = defineStore('chat', () => {
             );
             const data = response.data as ChatMessage[];
 
-            const current = messageCache.value.get(channelId) ?? [];
+            const current = withoutPendingEchoes(messageCache.value.get(channelId) ?? []);
             const merged = mergeById(data, current);
             const prepended = merged.length - current.length;
             touchCacheEntry(channelId, merged);
@@ -577,6 +609,7 @@ export const useChatStore = defineStore('chat', () => {
                     leaveChannel();
                     communityStore.setActiveChannel('');
                     messageCache.value.delete(goneChannelId);
+                    schedulePersistMessages();
                 }
             }
         });
@@ -693,7 +726,14 @@ export const useChatStore = defineStore('chat', () => {
         communityStore.removeCommunityLocally(communityId);
         // Permission hygiene: drop all cached messages when leaving/losing a
         // community so stale entries cannot leak after access is revoked.
+        // Persisted copy is wiped immediately (not debounced) so a pending
+        // write from before the clear can't resurrect it on next launch.
         messageCache.value.clear();
+        if (persistMessagesTimer) {
+            clearTimeout(persistMessagesTimer);
+            persistMessagesTimer = null;
+        }
+        persistCache(MESSAGE_CACHE_KEY, 2, []);
         if (wasActive) {
             leaveChannel();
             alert(notice);
@@ -763,7 +803,7 @@ export const useChatStore = defineStore('chat', () => {
             // real (o se marca fallido) cuando responde el servidor.
             const optimistic: ChatMessage = {
                 id: `pending-${clientNonce}`,
-                content: escapeLikeServer(content.trim()),
+                content: content.trim(),
                 userId: me.id,
                 channelId,
                 createdAt: new Date().toISOString(),
@@ -878,57 +918,54 @@ export const useChatStore = defineStore('chat', () => {
         }
     };
 
+    // Trabajo común a ambas rutas de openDM: cambia el canal activo, une el
+    // socket y dispara la carga de mensajes (ya cache-aware vía fetchMessages).
+    const activateDM = (friend: DMFriend, channelId: string) => {
+        clearUnread(friend.id);
+        homeView.value = 'friends';
+        activeDMUser.value = friend;
+
+        if (activeChannelId.value && activeChannelId.value !== channelId) {
+            leaveChannel();
+        }
+
+        activeChannelId.value = channelId;
+        if (socket.value) {
+            socket.value.emit('join_channel', channelId);
+        }
+
+        void fetchMessages(channelId);
+    };
+
     const openDM = async (friend: DMFriend) => {
-        console.log('[OPENDM] Iniciando openDM con friend:', friend.id, friend.username);
         const authStore2 = useAuthStore();
-        if (!authStore2.token) {
-            console.log('[OPENDM] No hay token');
+        if (!authStore2.token) return;
+
+        // Canal ya conocido (p. ej. un DM que ya está en el sidebar): activar
+        // de inmediato sin esperar red. El POST igual se dispara en segundo
+        // plano solo por su efecto de "des-ocultar" el DM en el backend si el
+        // usuario lo había cerrado antes — no bloquea la UI.
+        const knownChannelId = dmChannels.value.get(friend.id);
+        if (knownChannelId) {
+            activateDM(friend, knownChannelId);
+            api.post(`/friends/dm/${friend.id}`).catch(error => {
+                console.error('[OPENDM] Error re-sincronizando DM:', error.response?.status, error);
+            });
             return;
         }
 
         try {
-            console.log('[OPENDM] Llamando API...');
             const response = await api.post(`/friends/dm/${friend.id}`);
-            console.log('[OPENDM] Status:', response.status);
-
             const data = response.data;
-            console.log('[OPENDM] Datos recibidos:', data);
-            console.log('[OPENDM] channelId:', data.channelId);
 
-            // Track this DM channel
             dmChannels.value.set(friend.id, data.channelId);
             channelToFriend.value.set(data.channelId, friend.id);
 
-            // Reabrir un DM lo vuelve a mostrar en la lista (el backend ya lo
-            // des-ocultó para este usuario): re-agregarlo si no estaba.
             if (!conversations.value.some(c => c.channelId === data.channelId)) {
                 conversations.value.push({ channelId: data.channelId, friend });
             }
 
-            // Clear unread count when opening DM
-            clearUnread(friend.id);
-
-            // Salir de la vista de solicitudes al abrir un DM.
-            homeView.value = 'friends';
-            activeDMUser.value = friend;
-
-            if (activeChannelId.value) {
-                console.log('[OPENDM] Dejando canal anterior:', activeChannelId.value);
-                leaveChannel();
-            }
-
-            console.log('[OPENDM] Estableciendo activeChannelId:', data.channelId);
-            activeChannelId.value = data.channelId;
-            if (socket.value) {
-                console.log('[OPENDM] Emitiendo join_channel:', data.channelId);
-                socket.value.emit('join_channel', data.channelId);
-            }
-
-            // El servidor no envía ack de join_channel (los canales de comunidad
-            // ya operan sin ack); se procede a cargar mensajes sin demora.
-            console.log('[OPENDM] Llamando fetchMessages...');
-            await fetchMessages(data.channelId);
-            console.log('[OPENDM] Completado. messages.length:', messages.value.length);
+            activateDM(friend, data.channelId);
         } catch (error: any) {
             console.error('[OPENDM] Error:', error.response?.status, error);
         }

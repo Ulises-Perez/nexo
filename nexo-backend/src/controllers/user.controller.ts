@@ -505,46 +505,7 @@ export class UserController {
                 return;
             }
 
-            // Saca el id del "otro" usuario en cada amistad
-            const otherId = (selfId: string) => (f: { userAId: string; userBId: string }) =>
-                f.userAId === selfId ? f.userBId : f.userAId;
-
-            const [myFriendships, targetFriendships] = await Promise.all([
-                prisma.friendship.findMany({
-                    where: { OR: [{ userAId: userId }, { userBId: userId }] },
-                    select: { userAId: true, userBId: true },
-                }),
-                prisma.friendship.findMany({
-                    where: { OR: [{ userAId: targetId }, { userBId: targetId }] },
-                    select: { userAId: true, userBId: true },
-                }),
-            ]);
-
-            const myFriendIds = new Set(myFriendships.map(otherId(userId)));
-            const targetFriendIds = new Set(targetFriendships.map(otherId(targetId)));
-
-            // Intersección, excluyendo al solicitante y al objetivo
-            const mutualIds = [...myFriendIds].filter(
-                (fid) => targetFriendIds.has(fid) && fid !== userId && fid !== targetId
-            );
-
-            if (mutualIds.length === 0) {
-                res.status(200).json([]);
-                return;
-            }
-
-            const mutualUsers = await prisma.user.findMany({
-                where: { id: { in: mutualIds } },
-                select: {
-                    id: true,
-                    username: true,
-                    tag: true,
-                    avatarUrl: true,
-                    status: true,
-                },
-            });
-
-            res.status(200).json(mutualUsers);
+            res.status(200).json(await UserController.fetchMutualFriends(userId, targetId));
         } catch (error) {
             console.error('[UserController - getMutualFriends Error]', error);
             res.status(500).json({ error: 'Internal Server Error' });
@@ -562,40 +523,120 @@ export class UserController {
                 return;
             }
 
-            const [myMemberships, targetMemberships] = await Promise.all([
-                prisma.communityMember.findMany({
-                    where: { userId },
-                    select: { communityId: true },
-                }),
-                prisma.communityMember.findMany({
-                    where: { userId: targetId },
-                    select: { communityId: true },
-                }),
-            ]);
-
-            const targetCommunityIds = new Set(targetMemberships.map((m) => m.communityId));
-            const mutualCommunityIds = myMemberships
-                .map((m) => m.communityId)
-                .filter((cid) => targetCommunityIds.has(cid));
-
-            if (mutualCommunityIds.length === 0) {
-                res.status(200).json([]);
-                return;
-            }
-
-            const communities = await prisma.community.findMany({
-                where: { id: { in: mutualCommunityIds } },
-                select: {
-                    id: true,
-                    name: true,
-                    iconUrl: true,
-                },
-            });
-
-            res.status(200).json(communities);
+            res.status(200).json(await UserController.fetchMutualCommunities(userId, targetId));
         } catch (error) {
             console.error('[UserController - getMutualCommunities Error]', error);
             res.status(500).json({ error: 'Internal Server Error' });
         }
+    }
+
+    // GET /api/users/:id/profile-card — perfil + ambos "en común" en un solo
+    // round-trip. Evita que el cliente pague 3 idas y vueltas de red separadas
+    // (cada una con el mismo costo fijo de latencia) para pintar la tarjeta de
+    // un usuario en un DM; las 3 queries de Prisma corren en paralelo acá,
+    // donde el costo de red entre ellas es despreciable.
+    public static async getProfileCard(req: Request, res: Response): Promise<void> {
+        try {
+            const userId = req.user?.id;
+            const targetId = req.params.id as string;
+
+            if (!userId) {
+                res.status(401).json({ error: 'Unauthorized' });
+                return;
+            }
+
+            const [user, mutualFriends, mutualCommunities] = await Promise.all([
+                prisma.user.findUnique({
+                    where: { id: targetId },
+                    select: {
+                        id: true,
+                        username: true,
+                        tag: true,
+                        avatarUrl: true,
+                        status: true,
+                        bio: true,
+                        bannerUrl: true,
+                        bannerColor: true,
+                        accentColor: true,
+                        pronouns: true,
+                        customStatus: true,
+                        createdAt: true,
+                        connections: {
+                            orderBy: { createdAt: 'asc' },
+                            select: { id: true, platform: true, name: true, url: true },
+                        },
+                    },
+                }),
+                UserController.fetchMutualFriends(userId, targetId),
+                UserController.fetchMutualCommunities(userId, targetId),
+            ]);
+
+            if (!user) {
+                res.status(404).json({ error: 'User not found' });
+                return;
+            }
+
+            res.status(200).json({ user, mutualFriends, mutualCommunities });
+        } catch (error) {
+            console.error('[UserController - getProfileCard Error]', error);
+            res.status(500).json({ error: 'Internal Server Error' });
+        }
+    }
+
+    private static async fetchMutualFriends(userId: string, targetId: string) {
+        // Saca el id del "otro" usuario en cada amistad
+        const otherId = (selfId: string) => (f: { userAId: string; userBId: string }) =>
+            f.userAId === selfId ? f.userBId : f.userAId;
+
+        const [myFriendships, targetFriendships] = await Promise.all([
+            prisma.friendship.findMany({
+                where: { OR: [{ userAId: userId }, { userBId: userId }] },
+                select: { userAId: true, userBId: true },
+            }),
+            prisma.friendship.findMany({
+                where: { OR: [{ userAId: targetId }, { userBId: targetId }] },
+                select: { userAId: true, userBId: true },
+            }),
+        ]);
+
+        const myFriendIds = new Set(myFriendships.map(otherId(userId)));
+        const targetFriendIds = new Set(targetFriendships.map(otherId(targetId)));
+
+        // Intersección, excluyendo al solicitante y al objetivo
+        const mutualIds = [...myFriendIds].filter(
+            (fid) => targetFriendIds.has(fid) && fid !== userId && fid !== targetId
+        );
+
+        if (mutualIds.length === 0) return [];
+
+        return prisma.user.findMany({
+            where: { id: { in: mutualIds } },
+            select: { id: true, username: true, tag: true, avatarUrl: true, status: true },
+        });
+    }
+
+    private static async fetchMutualCommunities(userId: string, targetId: string) {
+        const [myMemberships, targetMemberships] = await Promise.all([
+            prisma.communityMember.findMany({
+                where: { userId },
+                select: { communityId: true },
+            }),
+            prisma.communityMember.findMany({
+                where: { userId: targetId },
+                select: { communityId: true },
+            }),
+        ]);
+
+        const targetCommunityIds = new Set(targetMemberships.map((m) => m.communityId));
+        const mutualCommunityIds = myMemberships
+            .map((m) => m.communityId)
+            .filter((cid) => targetCommunityIds.has(cid));
+
+        if (mutualCommunityIds.length === 0) return [];
+
+        return prisma.community.findMany({
+            where: { id: { in: mutualCommunityIds } },
+            select: { id: true, name: true, iconUrl: true },
+        });
     }
 }

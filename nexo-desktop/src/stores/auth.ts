@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import api from '../api/axios';
 import router from '../router';
+import { clearPersistedCache, MESSAGE_CACHE_KEY, DM_PROFILE_CACHE_KEY, COMMUNITY_MEMBERS_CACHE_KEY } from '../composables/persistedCache';
 
 export interface UserConnection {
     id: string;
@@ -44,6 +45,10 @@ export const useAuthStore = defineStore('auth', () => {
         token.value = null;
         user.value = null;
         localStorage.removeItem('nexo_token');
+        // Otra persona podría loguearse en esta misma máquina: los caches
+        // persistidos de mensajes/perfiles de DM son de este usuario, no
+        // deben sobrevivir al logout.
+        clearPersistedCache(MESSAGE_CACHE_KEY, DM_PROFILE_CACHE_KEY, COMMUNITY_MEMBERS_CACHE_KEY);
     };
 
     const fetchUser = async () => {

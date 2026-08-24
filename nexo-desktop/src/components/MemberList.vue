@@ -78,7 +78,7 @@ defineProps<{
 const communityStore = useCommunityStore();
 const profileStore = useUserProfileStore();
 
-const isLoading = computed(() => communityStore.activeMembers.length === 0 && communityStore.isLoading);
+const isLoading = computed(() => communityStore.activeMembers.length === 0 && communityStore.isActiveMembersLoading);
 
 const onlineMembers = computed(() => communityStore.activeMembers.filter(m => m.user.status === 'online'));
 const offlineMembers = computed(() => communityStore.activeMembers.filter(m => m.user.status !== 'online'));

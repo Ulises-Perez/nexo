@@ -5,7 +5,7 @@
     @click="profileStore.close()"
   >
     <div
-      class="relative w-[780px] max-w-[94vw] max-h-[88vh] bg-[#1e1f23] rounded-[20px] border border-white/[0.06] shadow-2xl shadow-black/80 overflow-hidden flex"
+      class="relative w-[780px] max-w-[94vw] min-h-[520px] max-h-[88vh] bg-[#1e1f23] rounded-[20px] border border-white/[0.06] shadow-2xl shadow-black/80 overflow-hidden flex"
       @click.stop
     >
       <!-- Cerrar -->
@@ -18,9 +18,39 @@
         </svg>
       </button>
 
-      <!-- Loading -->
-      <div v-if="isLoading" class="flex justify-center items-center w-full py-24">
-        <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      <!-- Loading: skeleton shaped like the real two-column layout, so the modal
+           doesn't jump in size once data arrives. -->
+      <div v-if="isLoading" class="flex w-full animate-pulse">
+        <div class="w-[340px] flex-shrink-0 flex flex-col border-r border-white/[0.06]">
+          <div class="h-28 bg-white/[0.04]"></div>
+          <div class="px-5 -mt-11 relative z-10">
+            <div class="rounded-full p-[5px] bg-[#1e1f23] w-fit">
+              <div class="w-16 h-16 rounded-full bg-white/[0.08]"></div>
+            </div>
+          </div>
+          <div class="px-5 mt-3 flex flex-col gap-2">
+            <div class="h-5 w-32 rounded bg-white/[0.06]"></div>
+            <div class="h-3 w-24 rounded bg-white/[0.04]"></div>
+            <div class="flex items-center gap-2 mt-3.5">
+              <div class="flex-1 h-9 rounded-lg bg-white/[0.05]"></div>
+              <div class="w-9 h-9 rounded-lg bg-white/[0.05]"></div>
+              <div class="w-9 h-9 rounded-lg bg-white/[0.05]"></div>
+            </div>
+          </div>
+          <div class="mx-4 mt-4 h-32 rounded-2xl bg-white/[0.03]"></div>
+        </div>
+        <div class="flex-1 flex flex-col min-w-0">
+          <div class="flex items-center gap-2 px-4 pt-4 pb-2 border-b border-white/[0.06]">
+            <div class="h-7 w-20 rounded-lg bg-white/[0.05]"></div>
+            <div class="h-7 w-28 rounded-lg bg-white/[0.03]"></div>
+            <div class="h-7 w-32 rounded-lg bg-white/[0.03]"></div>
+          </div>
+          <div class="flex-1 p-4 flex flex-col gap-3">
+            <div class="h-20 rounded-2xl bg-white/[0.03]"></div>
+            <div class="h-4 w-2/3 rounded bg-white/[0.04]"></div>
+            <div class="h-4 w-1/2 rounded bg-white/[0.04]"></div>
+          </div>
+        </div>
       </div>
 
       <template v-else-if="user">
@@ -257,6 +287,18 @@
                 </div>
               </div>
             </template>
+
+            <!-- Roles: aún cargando en segundo plano (solo aplica con contexto de comunidad) -->
+            <template v-else-if="isMemberLoading">
+              <div class="h-px bg-white/[0.06]"></div>
+              <div>
+                <p class="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-2">Roles</p>
+                <div class="flex items-center gap-1.5 animate-pulse">
+                  <div class="h-6 w-16 rounded-md bg-white/[0.05]"></div>
+                  <div class="h-6 w-20 rounded-md bg-white/[0.05]"></div>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -302,7 +344,12 @@
 
             <!-- Amigos en común -->
             <template v-else-if="activeTab === 'friends'">
-              <div v-if="mutualFriends.length > 0" class="flex flex-col gap-1">
+              <div v-if="isMutualsLoading && mutualFriends.length === 0" class="flex flex-col gap-1 animate-pulse">
+                <div class="h-10 rounded-xl bg-white/[0.03]"></div>
+                <div class="h-10 rounded-xl bg-white/[0.03]"></div>
+                <div class="h-10 rounded-xl bg-white/[0.03]"></div>
+              </div>
+              <div v-else-if="mutualFriends.length > 0" class="flex flex-col gap-1">
                 <button
                   v-for="f in mutualFriends"
                   :key="f.id"
@@ -320,7 +367,12 @@
 
             <!-- Servidores en común -->
             <template v-else-if="activeTab === 'communities'">
-              <div v-if="mutualCommunities.length > 0" class="flex flex-col gap-1">
+              <div v-if="isMutualsLoading && mutualCommunities.length === 0" class="flex flex-col gap-1 animate-pulse">
+                <div class="h-11 rounded-xl bg-white/[0.03]"></div>
+                <div class="h-11 rounded-xl bg-white/[0.03]"></div>
+                <div class="h-11 rounded-xl bg-white/[0.03]"></div>
+              </div>
+              <div v-else-if="mutualCommunities.length > 0" class="flex flex-col gap-1">
                 <div
                   v-for="c in mutualCommunities"
                   :key="c.id"
@@ -402,6 +454,8 @@ const userSettingsStore = useUserSettingsStore();
 const user = ref<ProfileUser | null>(null);
 const member = ref<CommunityMember | null>(null);
 const isLoading = ref(false);
+const isMemberLoading = ref(false);
+const isMutualsLoading = ref(false);
 const showRolePicker = ref(false);
 const roleSearch = ref('');
 const friendStatus = ref<FriendStatus>('loading');
@@ -527,54 +581,79 @@ watch(() => profileStore.isOpen, (open) => {
   if (!open) loadedUserId.value = '';
 });
 
+// Las tres llamadas (perfil+amistad, roles de comunidad, amigos/comunidades en
+// común) no dependen entre sí — solo necesitan el userId/communityId ya
+// conocidos de forma síncrona — así que se disparan todas en paralelo en vez
+// de esperarse en cadena. Solo la primera bloquea isLoading: roles y mutuals
+// se muestran cuando llegan, sin retrasar el resto del modal.
 const load = async () => {
+  const requestedId = profileStore.userId;
+  const requestedCommunityId = profileStore.communityId;
+  const self = requestedId === authStore.user?.id;
+
   isLoading.value = true;
+  isMemberLoading.value = false;
+  isMutualsLoading.value = false;
   user.value = null;
   member.value = null;
   friendStatus.value = 'loading';
   friendRequestId.value = '';
   mutualFriends.value = [];
   mutualCommunities.value = [];
+
+  if (requestedCommunityId) {
+    loadMember(requestedId, requestedCommunityId);
+  }
+  // Self-profile: skip mutuals (always empty with yourself).
+  if (!self) {
+    loadMutuals(requestedId);
+  }
+
   try {
     const [userResponse, status] = await Promise.all([
-      api.get(`/users/${profileStore.userId}`),
-      friendsStore.getFriendStatus(profileStore.userId),
+      api.get(`/users/${requestedId}`),
+      friendsStore.getFriendStatus(requestedId),
     ]);
+    if (loadedUserId.value !== requestedId) return; // se reabrió para otro usuario mientras tanto
     user.value = userResponse.data;
     friendStatus.value = status.status as FriendStatus;
     friendRequestId.value = status.requestId ?? '';
-
-    if (profileStore.communityId) {
-      await loadMember();
-    }
-
-    // Self-profile: skip mutuals (always empty with yourself).
-    if (!isSelf.value) {
-      await loadMutuals();
-    }
   } catch (error) {
     console.error('Error cargando perfil:', error);
   } finally {
-    isLoading.value = false;
+    if (loadedUserId.value === requestedId) isLoading.value = false;
   }
 };
 
-const loadMutuals = async () => {
+const loadMutuals = async (requestedId: string) => {
+  isMutualsLoading.value = true;
   try {
     const [friendsRes, communitiesRes] = await Promise.all([
-      api.get(`/users/${profileStore.userId}/mutual-friends`),
-      api.get(`/users/${profileStore.userId}/mutual-communities`),
+      api.get(`/users/${requestedId}/mutual-friends`),
+      api.get(`/users/${requestedId}/mutual-communities`),
     ]);
+    if (loadedUserId.value !== requestedId) return;
     mutualFriends.value = friendsRes.data ?? [];
     mutualCommunities.value = communitiesRes.data ?? [];
   } catch (error) {
     console.error('Error cargando datos en común:', error);
+  } finally {
+    if (loadedUserId.value === requestedId) isMutualsLoading.value = false;
   }
 };
 
-const loadMember = async () => {
-  const members = await communityStore.fetchMembers(profileStore.communityId);
-  member.value = members.find(m => m.userId === profileStore.userId) ?? null;
+const loadMember = async (
+  requestedId: string = profileStore.userId,
+  communityId: string = profileStore.communityId,
+) => {
+  isMemberLoading.value = true;
+  try {
+    const members = await communityStore.getMembersCached(communityId);
+    if (loadedUserId.value !== requestedId) return;
+    member.value = members.find(m => m.userId === requestedId) ?? null;
+  } finally {
+    if (loadedUserId.value === requestedId) isMemberLoading.value = false;
+  }
 };
 
 const editProfile = () => {

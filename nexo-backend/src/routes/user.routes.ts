@@ -25,6 +25,10 @@ router.get('/:id/mutual-friends', requireAuth, UserController.getMutualFriends);
 // Endpoint: GET /api/users/:id/mutual-communities (Comunidades en común)
 router.get('/:id/mutual-communities', requireAuth, UserController.getMutualCommunities);
 
+// Endpoint: GET /api/users/:id/profile-card — perfil + ambos "en común" en un
+// solo round-trip (usado por la tarjeta de usuario en DMs).
+router.get('/:id/profile-card', requireAuth, UserController.getProfileCard);
+
 // Endpoint: GET /api/users/:id
 router.get('/:id', requireAuth, UserController.getById);
 

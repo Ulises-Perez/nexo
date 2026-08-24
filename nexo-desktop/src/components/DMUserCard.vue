@@ -61,7 +61,9 @@
 
       <!-- Servidores en común -->
       <div class="mx-3 mb-2">
+        <div v-if="isLoadingExtra" class="h-[42px] rounded-xl bg-white/[0.03] animate-pulse"></div>
         <button
+          v-else
           @click="mutualCommunities.length > 0 && (showCommunities = !showCommunities)"
           :disabled="mutualCommunities.length === 0"
           class="w-full flex items-center justify-between px-3 py-2.5 bg-[#141518] border border-white/[0.06] rounded-xl transition-colors disabled:cursor-default"
@@ -97,7 +99,9 @@
 
       <!-- Amigos en común -->
       <div class="mx-3 mb-2">
+        <div v-if="isLoadingExtra" class="h-[42px] rounded-xl bg-white/[0.03] animate-pulse"></div>
         <button
+          v-else
           @click="mutualFriends.length > 0 && (showFriends = !showFriends)"
           :disabled="mutualFriends.length === 0"
           class="w-full flex items-center justify-between px-3 py-2.5 bg-[#141518] border border-white/[0.06] rounded-xl transition-colors disabled:cursor-default"
@@ -146,27 +150,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
+import { computed, watch, onMounted, ref } from 'vue';
 import { useUserProfileStore } from '../stores/userProfile';
 import { useChatStore } from '../stores/chat';
 import type { DMFriend } from '../stores/chat';
 import { useUserBanner } from '../composables/useUserBanner';
 import { useReadableAccent } from '../composables/useReadableAccent';
+import { loadDMProfileExtra, getDMProfileExtra, isDMProfileExtraLoading } from '../composables/dmProfileCache';
 import UserAvatar from './UserAvatar.vue';
-import api from '../api/axios';
-
-interface MutualFriend {
-  id: string;
-  username: string;
-  tag: string;
-  avatarUrl: string | null;
-  status: string;
-}
-interface MutualCommunity {
-  id: string;
-  name: string;
-  iconUrl: string | null;
-}
 
 const props = defineProps<{
   user: DMFriend;
@@ -175,21 +166,6 @@ const props = defineProps<{
 const profileStore = useUserProfileStore();
 const chatStore = useChatStore();
 
-// Datos enriquecidos del usuario (incluye createdAt, no disponible en DMFriend)
-const createdAt = ref<string | null>(null);
-const fetchedUsername = ref<string | null>(null);
-const fetchedTag = ref<string | null>(null);
-const fetchedAvatarUrl = ref<string | null>(null);
-const fetchedStatus = ref<string | null>(null);
-const fetchedBio = ref<string | null>(null);
-const fetchedBannerUrl = ref<string | null>(null);
-const fetchedBannerColor = ref<string | null>(null);
-const fetchedAccentColor = ref<string | null>(null);
-const fetchedPronouns = ref<string | null>(null);
-const fetchedCustomStatus = ref<string | null>(null);
-
-const mutualFriends = ref<MutualFriend[]>([]);
-const mutualCommunities = ref<MutualCommunity[]>([]);
 const showFriends = ref(false);
 const showCommunities = ref(false);
 
@@ -199,31 +175,24 @@ const liveUser = computed<DMFriend | null>(() =>
   chatStore.activeDMUser?.id === props.user.id ? chatStore.activeDMUser : null
 );
 
-// Se prefieren: store en vivo > datos recién obtenidos > props
-const displayUsername = computed(() => liveUser.value?.username ?? fetchedUsername.value ?? props.user.username);
-const displayTag = computed(() => fetchedTag.value ?? props.user.tag);
-const displayAvatarUrl = computed(() => liveUser.value?.avatarUrl ?? fetchedAvatarUrl.value ?? props.user.avatarUrl);
-const displayStatus = computed(() => liveUser.value?.status ?? fetchedStatus.value ?? props.user.status);
+const displayUsername = computed(() => liveUser.value?.username ?? props.user.username);
+const displayTag = computed(() => props.user.tag);
+const displayAvatarUrl = computed(() => liveUser.value?.avatarUrl ?? props.user.avatarUrl);
+const displayStatus = computed(() => liveUser.value?.status ?? props.user.status);
 
-// Whether this card has its own fetched payload yet (first paint falls back to
-// props until loadUser resolves).
-const hasFetched = computed(() => fetchedUsername.value !== null);
+// bio/banner/pronouns/etc. no vienen en la lista de conversaciones — se piden
+// aparte (cacheados por usuario, ver dmProfileCache) y llegan más tarde.
+const extra = computed(() => getDMProfileExtra(props.user.id));
+const isLoadingExtra = computed(() => isDMProfileExtraLoading(props.user.id));
+const mutualFriends = computed(() => extra.value?.mutualFriends ?? []);
+const mutualCommunities = computed(() => extra.value?.mutualCommunities ?? []);
 
-// Pick the SOURCE first (live store if it matches this user, else the fetched
-// payload), THEN read the field — so a live `null` (user cleared the field)
-// correctly overrides a stale fetched value instead of falling through to it.
+// Pick the SOURCE first (live store if it matches this user, else the cached
+// extra payload), THEN read the field — so a live `null` (user cleared the
+// field) correctly overrides a stale cached value instead of falling through.
 const richFields = computed(() => {
   if (liveUser.value) return liveUser.value;
-  if (hasFetched.value) {
-    return {
-      bio: fetchedBio.value,
-      pronouns: fetchedPronouns.value,
-      customStatus: fetchedCustomStatus.value,
-      accentColor: fetchedAccentColor.value,
-      bannerUrl: fetchedBannerUrl.value,
-      bannerColor: fetchedBannerColor.value,
-    };
-  }
+  if (extra.value) return extra.value;
   return null;
 });
 
@@ -236,8 +205,8 @@ const accentColor = computed(() => richFields.value?.accentColor ?? null);
 const { nameStyle } = useReadableAccent(accentColor);
 
 const memberSince = computed(() => {
-  if (!createdAt.value) return '—';
-  return new Date(createdAt.value).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
+  if (!extra.value?.createdAt) return '—';
+  return new Date(extra.value.createdAt).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
 });
 
 // Banner resuelto vía composable compartido (imagen > color > degradado).
@@ -249,71 +218,21 @@ const { bannerStyle } = useUserBanner(() => ({
   username: displayUsername.value,
 }));
 
-const resetFetched = () => {
-  createdAt.value = null;
-  fetchedUsername.value = null;
-  fetchedTag.value = null;
-  fetchedAvatarUrl.value = null;
-  fetchedStatus.value = null;
-  fetchedBio.value = null;
-  fetchedBannerUrl.value = null;
-  fetchedBannerColor.value = null;
-  fetchedAccentColor.value = null;
-  fetchedPronouns.value = null;
-  fetchedCustomStatus.value = null;
-  mutualFriends.value = [];
-  mutualCommunities.value = [];
-  showFriends.value = false;
-  showCommunities.value = false;
-};
-
-const loadUser = async (id: string) => {
-  try {
-    const { data } = await api.get(`/users/${id}`);
-    createdAt.value = data.createdAt ?? null;
-    fetchedUsername.value = data.username ?? null;
-    fetchedTag.value = data.tag ?? null;
-    fetchedAvatarUrl.value = data.avatarUrl ?? null;
-    fetchedStatus.value = data.status ?? null;
-    fetchedBio.value = data.bio ?? null;
-    fetchedBannerUrl.value = data.bannerUrl ?? null;
-    fetchedBannerColor.value = data.bannerColor ?? null;
-    fetchedAccentColor.value = data.accentColor ?? null;
-    fetchedPronouns.value = data.pronouns ?? null;
-    fetchedCustomStatus.value = data.customStatus ?? null;
-  } catch (error) {
-    // Ante un error se mantienen los datos pasados por props
-    console.error('Error cargando datos del usuario del DM:', error);
-  }
-};
-
-const loadMutuals = async (id: string) => {
-  try {
-    const [friendsRes, communitiesRes] = await Promise.all([
-      api.get(`/users/${id}/mutual-friends`),
-      api.get(`/users/${id}/mutual-communities`),
-    ]);
-    mutualFriends.value = friendsRes.data ?? [];
-    mutualCommunities.value = communitiesRes.data ?? [];
-  } catch (error) {
-    console.error('Error cargando datos en común:', error);
-  }
-};
-
 const openProfile = () => {
   profileStore.open(props.user.id);
 };
 
 onMounted(() => {
-  loadUser(props.user.id);
-  loadMutuals(props.user.id);
+  showFriends.value = false;
+  showCommunities.value = false;
+  loadDMProfileExtra(props.user.id);
 });
 
 // Recargar cuando cambia el usuario del DM
 watch(() => props.user.id, (id) => {
-  resetFetched();
-  loadUser(id);
-  loadMutuals(id);
+  showFriends.value = false;
+  showCommunities.value = false;
+  loadDMProfileExtra(id);
 });
 </script>
 

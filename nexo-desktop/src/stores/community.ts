@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { useAuthStore } from './auth';
 import api from '../api/axios';
+import { hydrateCache, persistCache, COMMUNITY_MEMBERS_CACHE_KEY } from '../composables/persistedCache';
 
 // Bitfield de permisos (debe coincidir con el backend)
 export const Permissions = {
@@ -91,6 +92,25 @@ export const useCommunityStore = defineStore('community', () => {
     // Miembros (con sus roles) de la comunidad activa — fuente única para el chat y la lista
     const activeMembers = ref<CommunityMember[]>([]);
     const activeMembersCommunityId = ref<string>('');
+    // ¿Sigue en vuelo la carga de la comunidad activa? (solo en cache-miss —
+    // ver loadActiveMembers). Reemplaza el uso previo del `isLoading` genérico
+    // de fetchCommunities, que nunca reflejaba esto.
+    const isActiveMembersLoading = ref(false);
+
+    // Cache de miembros por comunidad (stale-while-revalidate + persistido en
+    // localStorage), mismo patrón que messageCache/dmProfileCache: entrar a
+    // una comunidad ya visitada pinta al instante en vez de esperar la red.
+    const membersCache = ref<Map<string, CommunityMember[]>>(
+        new Map(hydrateCache<Array<[string, CommunityMember[]]>>(COMMUNITY_MEMBERS_CACHE_KEY, 1) ?? [])
+    );
+    let persistMembersTimer: ReturnType<typeof setTimeout> | null = null;
+    const schedulePersistMembers = () => {
+        if (persistMembersTimer) clearTimeout(persistMembersTimer);
+        persistMembersTimer = setTimeout(() => {
+            persistMembersTimer = null;
+            persistCache(COMMUNITY_MEMBERS_CACHE_KEY, 1, Array.from(membersCache.value.entries()));
+        }, 400);
+    };
 
     // Contador de no leídos por canal de comunidad (en memoria; se reinicia al recargar).
     // channelId -> cantidad de mensajes sin leer.
@@ -185,6 +205,12 @@ export const useCommunityStore = defineStore('community', () => {
     // Quita la comunidad del estado local (al salir, ser expulsado o que se elimine)
     const removeCommunityLocally = (communityId: string) => {
         communities.value = communities.value.filter(c => c.id !== communityId);
+
+        // Permission hygiene: el cache de miembros de esta comunidad no debe
+        // sobrevivir a perder el acceso.
+        if (membersCache.value.delete(communityId)) {
+            schedulePersistMembers();
+        }
 
         if (activeCommunityId.value === communityId) {
             activeCommunityId.value = '';
@@ -396,23 +422,95 @@ export const useCommunityStore = defineStore('community', () => {
         if (activeMembersCommunityId.value !== communityId) return;
         if (activeMembers.value.some(m => m.userId === member.userId)) return;
         activeMembers.value.push(member);
+
+        const cached = membersCache.value.get(communityId);
+        if (cached && !cached.some(m => m.userId === member.userId)) {
+            cached.push(member);
+            schedulePersistMembers();
+        }
+
         const community = communities.value.find(c => c.id === communityId);
         if (community) {
             community.memberCount = community.memberCount + 1;
         }
     };
 
-    // Carga (o limpia) los miembros de la comunidad activa
+    // Como fetchMembers pero sin tragarse el error: un fallo transitorio al
+    // revalidar en segundo plano no debe pisar un cache bueno con [].
+    const fetchMembersOrThrow = async (communityId: string): Promise<CommunityMember[]> => {
+        const response = await api.get(`/communities/${communityId}/members`);
+        return response.data;
+    };
+
+    // Carga (o limpia) los miembros de la comunidad activa. Stale-while-
+    // revalidate: si ya hay cache para esta comunidad se pinta al instante y
+    // se revalida en segundo plano; solo un cache-miss real muestra loading.
     const loadActiveMembers = async (communityId: string) => {
         activeMembersCommunityId.value = communityId;
         if (!communityId) {
             activeMembers.value = [];
+            isActiveMembersLoading.value = false;
             return;
         }
-        const members = await fetchMembers(communityId);
-        // Evitar sobrescribir si el usuario ya cambió de comunidad mientras cargaba
-        if (activeMembersCommunityId.value === communityId) {
-            activeMembers.value = members;
+
+        const cached = membersCache.value.get(communityId);
+        if (cached) {
+            activeMembers.value = cached;
+            isActiveMembersLoading.value = false;
+            void revalidateActiveMembers(communityId);
+            return;
+        }
+
+        activeMembers.value = [];
+        isActiveMembersLoading.value = true;
+        try {
+            const members = await fetchMembersOrThrow(communityId);
+            membersCache.value.set(communityId, members);
+            schedulePersistMembers();
+            // Evitar sobrescribir si el usuario ya cambió de comunidad mientras cargaba
+            if (activeMembersCommunityId.value === communityId) {
+                activeMembers.value = members;
+            }
+        } catch (error) {
+            console.error('Error fetching members:', error);
+        } finally {
+            if (activeMembersCommunityId.value === communityId) {
+                isActiveMembersLoading.value = false;
+            }
+        }
+    };
+
+    const revalidateActiveMembers = async (communityId: string) => {
+        try {
+            const members = await fetchMembersOrThrow(communityId);
+            membersCache.value.set(communityId, members);
+            schedulePersistMembers();
+            if (activeMembersCommunityId.value === communityId) {
+                activeMembers.value = members;
+            }
+        } catch (error) {
+            console.error('Error revalidating members:', error);
+        }
+    };
+
+    // Versión cache-aware de fetchMembers para un lookup puntual (p. ej. el
+    // modal de perfil buscando UN miembro) sin tocar el estado de "comunidad
+    // activa". Cache-hit: devuelve al instante y revalida en segundo plano;
+    // cache-miss: espera la red y de paso deja el cache tibio para la próxima.
+    const getMembersCached = async (communityId: string): Promise<CommunityMember[]> => {
+        const cached = membersCache.value.get(communityId);
+        if (cached) {
+            void revalidateActiveMembers(communityId);
+            return cached;
+        }
+        try {
+            const members = await fetchMembersOrThrow(communityId);
+            membersCache.value.set(communityId, members);
+            schedulePersistMembers();
+            return members;
+        } catch (error) {
+            console.error('Error fetching members:', error);
+            return [];
         }
     };
 
@@ -437,6 +535,7 @@ export const useCommunityStore = defineStore('community', () => {
         activeCommunity,
         activeMembers,
         isLoading,
+        isActiveMembersLoading,
         can,
         channelUnreads,
         getChannelUnread,
@@ -445,6 +544,7 @@ export const useCommunityStore = defineStore('community', () => {
         getCommunityUnread,
         loadActiveMembers,
         addActiveMember,
+        getMembersCached,
         getMemberRoleColor,
         fetchCommunities,
         setActiveCommunity,
