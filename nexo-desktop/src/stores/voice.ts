@@ -36,6 +36,10 @@ export const useVoiceStore = defineStore('voice', () => {
     const peers = new Map<string, RTCPeerConnection>();
     const audioElements = new Map<string, HTMLAudioElement>();
 
+    // Distingue la primera conexión del socket de una reconexión (drop de red,
+    // reinicio del backend, laptop suspendida, etc.).
+    let hasConnectedBefore = false;
+
     const getParticipants = (channelId: string): VoiceParticipant[] => {
         return voiceStates.value[channelId] ?? [];
     };
@@ -242,6 +246,24 @@ export const useVoiceStore = defineStore('voice', () => {
     const bindSocket = (s: Socket) => {
         socket = s;
 
+        socket.on('connect', () => {
+            // Toda reconexión (drop de red, backend reiniciado, laptop
+            // suspendida) llega con un socket.id nuevo: el server ya nos
+            // sacó de voiceChannels en su handler de disconnect, así que
+            // localmente hay que reflejar eso y reingresar si seguíamos
+            // "conectados" a un canal — si no, el audio P2P sigue sonando
+            // pero el roster del servidor ya no nos tiene, y nadie ve a
+            // nadie hasta el próximo refresh manual.
+            if (hasConnectedBefore && connectedChannelId.value) {
+                const channelId = connectedChannelId.value;
+                connectedChannelId.value = '';
+                peers.forEach((_, socketId) => destroyPeer(socketId));
+                peers.clear();
+                joinVoice(channelId);
+            }
+            hasConnectedBefore = true;
+        });
+
         socket.on('voice_joined', (data: { channelId: string; peers: VoiceParticipant[] }) => {
             connectedChannelId.value = data.channelId;
             isConnecting.value = false;
@@ -285,6 +307,7 @@ export const useVoiceStore = defineStore('voice', () => {
         leaveVoice();
         socket = null;
         voiceStates.value = {};
+        hasConnectedBefore = false;
     };
 
     // Pide el estado de voz de los canales indicados (al entrar a una comunidad)

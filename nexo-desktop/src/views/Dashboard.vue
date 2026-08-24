@@ -399,6 +399,18 @@ onMounted(async () => {
   chatStore.connectSocket();
   if (chatStore.socket) {
     voiceStore.bindSocket(chatStore.socket as unknown as Socket);
+
+    // Tras una reconexión, el roster de voz de la comunidad activa puede
+    // haber quedado desactualizado (se perdieron los voice_state_update
+    // emitidos mientras este socket estaba caído). Se resincroniza aparte
+    // del auto-reingreso al canal propio que ya maneja voiceStore.bindSocket.
+    let hasConnectedBefore = false;
+    chatStore.socket.on('connect', () => {
+      if (hasConnectedBefore && communityStore.activeCommunityId) {
+        syncVoiceForCommunity(communityStore.activeCommunityId);
+      }
+      hasConnectedBefore = true;
+    });
   }
   await Promise.all([
     communityStore.fetchCommunities(),
