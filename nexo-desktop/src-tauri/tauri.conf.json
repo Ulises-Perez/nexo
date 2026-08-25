@@ -27,7 +27,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -35,5 +36,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://nexo-production-2df4.up.railway.app/api/updates/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGMkUxRTg0QjE4OEY1MTgKUldRWTlZaXhoQjR1N3dGWGp5b2xURWt2QWFDVlRSMlFpYjJ0UXlGVy9nM3pnR3NBWFhpUUVBWXEK"
+    }
   }
 }

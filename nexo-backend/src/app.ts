@@ -9,6 +9,7 @@ import channelRoutes from './routes/channel.routes';
 import categoryRoutes from './routes/category.routes';
 import inviteRoutes from './routes/invite.routes';
 import friendRoutes from './routes/friend.routes';
+import updateRoutes from './routes/updates.routes';
 
 const app: Application = express();
 
@@ -35,5 +36,6 @@ app.use('/api/channels', channelRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/friends', friendRoutes);
+app.use('/api/updates', updateRoutes);
 
 export default app;
