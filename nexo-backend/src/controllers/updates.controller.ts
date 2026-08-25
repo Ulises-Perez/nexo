@@ -18,6 +18,8 @@ export class UpdatesController {
 
             res.status(200).json(manifest);
         } catch (error) {
+            console.error('[updates.getManifest]', error);
+
             if (error instanceof Error && error.message === 'Release assets incomplete') {
                 res.status(500).json({ error: 'Release assets incomplete' });
                 return;
@@ -50,6 +52,7 @@ export class UpdatesController {
 
             Readable.fromWeb(assetResponse.body as import('node:stream/web').ReadableStream).pipe(res);
         } catch (error) {
+            console.error('[updates.downloadAsset]', error);
             res.status(500).json({ error: "Internal Server Error" });
         }
     }
