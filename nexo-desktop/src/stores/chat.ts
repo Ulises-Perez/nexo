@@ -925,6 +925,13 @@ export const useChatStore = defineStore('chat', () => {
         homeView.value = 'friends';
         activeDMUser.value = friend;
 
+        // Abrir un DM siempre saca de la vista de comunidad activa — si no se
+        // limpia, el Dashboard sigue mostrando el sidebar/layout de esa
+        // comunidad encima del DM (p. ej. al abrir un DM desde el perfil de
+        // un miembro dentro de una comunidad).
+        const communityStore = useCommunityStore();
+        communityStore.activeCommunityId = '';
+
         if (activeChannelId.value && activeChannelId.value !== channelId) {
             leaveChannel();
         }
