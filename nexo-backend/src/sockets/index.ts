@@ -177,12 +177,20 @@ const emitToChannelMembers = async (io: Server, channelId: string, event: string
 
 // Emite el estado actual de un canal de voz a la sala de su comunidad
 const emitVoiceStateUpdate = async (io: Server, channelId: string) => {
-    const communityId = await getCommunityIdOfChannel(channelId);
-    if (!communityId) return;
-    io.to(`community:${communityId}`).emit('voice_state_update', {
-        channelId,
-        participants: getVoiceParticipants(channelId),
-    });
+    try {
+        const communityId = await getCommunityIdOfChannel(channelId);
+        if (!communityId) return;
+        io.to(`community:${communityId}`).emit('voice_state_update', {
+            channelId,
+            participants: getVoiceParticipants(channelId),
+        });
+    } catch (error) {
+        // Varios call sites (leave_voice, disconnect, voice_mute, screen share)
+        // no envuelven esta función en su propio try/catch: un error transitorio
+        // de la base acá (p. ej. Postgres reiniciando) no debe tirar todo el
+        // proceso y desconectar a todos los que están en una llamada de voz.
+        console.error('[Socket.io] Error en emitVoiceStateUpdate:', error);
+    }
 };
 
 export const setupSockets = (io: Server) => {
@@ -199,42 +207,69 @@ export const setupSockets = (io: Server) => {
         }
         userSockets.get(userId)!.add(socket.id);
 
-        if (userSockets.get(userId)!.size === 1) {
-            await updateUserStatus(userId, 'online');
-            await emitStatusToFriends(io, userId, 'online');
-            console.log(`[Socket.io] User ${userId} está online`);
-        }
-
+        // Sala personal: sincrónico e infalible, se une antes que nada más
+        // pueda fallar más abajo — así los DMs y eventos de estado le siguen
+        // llegando a este socket aunque el resto del setup falle.
         socket.join(`user:${userId}`);
 
-        // Unirse a las salas de todas sus comunidades (para eventos en tiempo real)
-        const communityIds = await getCommunityIdsOfUser(userId);
-        communityIds.forEach(id => socket.join(`community:${id}`));
+        // Datos básicos del usuario (para typing y voz). Se hidratan en el
+        // bloque protegido de abajo; si falla, sigue en null y se usa el
+        // fallback "Usuario" ya existente en el resto del archivo.
+        let me: { username: string; avatarUrl: string | null } | null = null;
 
-        // Datos básicos del usuario (para typing y voz)
-        const me = await prisma.user.findUnique({
-            where: { id: userId },
-            select: { username: true, avatarUrl: true },
-        });
+        try {
+            if (userSockets.get(userId)!.size === 1) {
+                await updateUserStatus(userId, 'online');
+                await emitStatusToFriends(io, userId, 'online');
+                console.log(`[Socket.io] User ${userId} está online`);
+            }
 
-        socket.emit('my_status', { status: 'online' });
+            // Unirse a las salas de todas sus comunidades (para eventos en tiempo real)
+            const communityIds = await getCommunityIdsOfUser(userId);
+            communityIds.forEach(id => socket.join(`community:${id}`));
+
+            me = await prisma.user.findUnique({
+                where: { id: userId },
+                select: { username: true, avatarUrl: true },
+            });
+
+            socket.emit('my_status', { status: 'online' });
+        } catch (error) {
+            // Si esto tira (p. ej. la base reiniciando), sin este catch el
+            // callback de 'connection' corta acá y NUNCA se registran los
+            // socket.on(...) de abajo — incluido 'disconnect'. El socket
+            // queda conectado a nivel de transporte pero sin ningún listener,
+            // y la entrada en userSockets nunca se limpia (queda un "zombie"
+            // permanente). Loguear y seguir: la sesión queda degradada
+            // (sin salas de comunidad, sin username propio) hasta que el
+            // cliente reconecte solo.
+            console.error('[Socket.io] Error en setup de conexión:', error);
+        }
 
         // El cliente lo emite tras crear o unirse a una comunidad
         socket.on('join_community_room', async (communityId: string) => {
-            const ctx = await getMemberContext(userId, communityId);
-            if (!ctx) return;
-            socket.join(`community:${communityId}`);
+            try {
+                const ctx = await getMemberContext(userId, communityId);
+                if (!ctx) return;
+                socket.join(`community:${communityId}`);
+            } catch (error) {
+                console.error('[Socket.io] Error en join_community_room:', error);
+            }
         });
 
         socket.on('join_channel', async (channelId: string) => {
-            // Verificar que el usuario tiene acceso al canal
-            const hasAccess = await isUserMemberOfChannel(userId, channelId);
-            if (!hasAccess) {
-                console.log(`[Socket.io] User ${userId} intentó unirse a canal no autorizado: ${channelId}`);
-                return;
+            try {
+                // Verificar que el usuario tiene acceso al canal
+                const hasAccess = await isUserMemberOfChannel(userId, channelId);
+                if (!hasAccess) {
+                    console.log(`[Socket.io] User ${userId} intentó unirse a canal no autorizado: ${channelId}`);
+                    return;
+                }
+                socket.join(channelId);
+                console.log(`[Socket.io] User ${userId} se unión al canal: ${channelId}`);
+            } catch (error) {
+                console.error('[Socket.io] Error en join_channel:', error);
             }
-            socket.join(channelId);
-            console.log(`[Socket.io] User ${userId} se unión al canal: ${channelId}`);
         });
 
         socket.on('leave_channel', (channelId: string) => {
@@ -450,7 +485,11 @@ export const setupSockets = (io: Server) => {
         });
 
         socket.on('leave_voice', async () => {
-            await leaveVoice();
+            try {
+                await leaveVoice();
+            } catch (error) {
+                console.error('[Socket.io] Error en leave_voice:', error);
+            }
         });
 
         // Relay de señalización WebRTC (ofertas, respuestas y candidatos ICE)
@@ -498,16 +537,35 @@ export const setupSockets = (io: Server) => {
         socket.on('disconnect', async () => {
             console.log(`[Socket.io] Usuario Desconectado. Socket ID: ${socket.id} - User ID: ${userId}`);
 
-            await leaveVoice();
+            // Tres fallas aisladas a propósito, no un único try/catch: este es
+            // el handler más frecuente de todos (corre en cada logout, cierre
+            // de app, corte de red), así que ningún error acá puede tirar el
+            // proceso — pero tampoco puede dejar la limpieza de userSockets
+            // acoplada a una llamada que puede fallar (leaveVoice), ni el aviso
+            // de "offline" silenciado por un error que no tiene nada que ver.
 
+            try {
+                await leaveVoice();
+            } catch (error) {
+                console.error('[Socket.io] Error saliendo de voz en disconnect:', error);
+            }
+
+            // Limpieza sincrónica, infalible: siempre corre, pase lo que pase arriba.
             userSockets.get(userId)?.delete(socket.id);
-
-            if (userSockets.get(userId)?.size === 0) {
+            const isLastSocket = userSockets.get(userId)?.size === 0;
+            if (isLastSocket) {
                 userSockets.delete(userId);
-                await updateUserStatus(userId, 'offline');
-                await emitStatusToFriends(io, userId, 'offline');
-                socket.to(`user:${userId}`).emit('my_status', { status: 'offline' });
-                console.log(`[Socket.io] User ${userId} está offline`);
+            }
+
+            if (isLastSocket) {
+                try {
+                    await updateUserStatus(userId, 'offline');
+                    await emitStatusToFriends(io, userId, 'offline');
+                    socket.to(`user:${userId}`).emit('my_status', { status: 'offline' });
+                    console.log(`[Socket.io] User ${userId} está offline`);
+                } catch (error) {
+                    console.error('[Socket.io] Error notificando offline en disconnect:', error);
+                }
             }
         });
     });
