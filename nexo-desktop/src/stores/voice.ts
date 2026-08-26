@@ -26,6 +26,11 @@ export const useVoiceStore = defineStore('voice', () => {
     const isConnecting = ref(false);
     const isMuted = ref(false);
     const isDeafened = ref(false);
+    // True entre que el socket se cae y logra reingresar al mismo canal —
+    // sin esto el panel sigue mostrando "Voz conectada" durante todo el
+    // corte (p. ej. un reinicio del backend) y la gente reingresa a mano
+    // en vez de esperar a que el reingreso automático haga su trabajo.
+    const isReconnecting = ref(false);
 
     // Estado de voz de todos los canales visibles: channelId -> participantes
     const voiceStates = ref<Record<string, VoiceParticipant[]>>({});
@@ -273,9 +278,19 @@ export const useVoiceStore = defineStore('voice', () => {
             hasConnectedBefore = true;
         });
 
+        socket.on('disconnect', () => {
+            // Todavía "conectados" a un canal según nuestro estado: es un
+            // corte a reconectar, no una salida voluntaria (leaveVoice ya
+            // limpia connectedChannelId antes de desconectar el socket).
+            if (connectedChannelId.value) {
+                isReconnecting.value = true;
+            }
+        });
+
         socket.on('voice_joined', (data: { channelId: string; peers: VoiceParticipant[] }) => {
             connectedChannelId.value = data.channelId;
             isConnecting.value = false;
+            isReconnecting.value = false;
 
             // Conectado por completo: sonido de entrada y análisis del micrófono propio
             playJoinSound();
@@ -380,6 +395,7 @@ export const useVoiceStore = defineStore('voice', () => {
 
         connectedChannelId.value = '';
         isConnecting.value = false;
+        isReconnecting.value = false;
 
         if (wasConnected) playLeaveSound();
     };
@@ -404,6 +420,7 @@ export const useVoiceStore = defineStore('voice', () => {
     return {
         connectedChannelId,
         isConnecting,
+        isReconnecting,
         isMuted,
         isDeafened,
         voiceStates,

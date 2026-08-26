@@ -4,11 +4,17 @@
     class="border-t border-white/[0.06] bg-[#15161a] px-3 py-2.5 flex items-center gap-2"
   >
     <div class="flex-1 min-w-0">
-      <p class="text-[12px] font-semibold flex items-center gap-1.5" :class="voiceStore.isConnecting ? 'text-amber-400' : 'text-emerald-400'">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <p
+        class="text-[12px] font-semibold flex items-center gap-1.5"
+        :class="voiceStore.isReconnecting ? 'text-red-400' : voiceStore.isConnecting ? 'text-amber-400' : 'text-emerald-400'"
+      >
+        <svg v-if="voiceStore.isReconnecting" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
         </svg>
-        {{ voiceStore.isConnecting ? 'Conectando...' : 'Voz conectada' }}
+        {{ voiceStore.isReconnecting ? 'Reconectando...' : voiceStore.isConnecting ? 'Conectando...' : 'Voz conectada' }}
       </p>
       <p class="text-[11px] text-gray-500 truncate">{{ channelName }}</p>
     </div>
