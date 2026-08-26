@@ -1,6 +1,6 @@
 <template>
   <div
-    v-if="voiceStore.connectedChannelId || voiceStore.isConnecting"
+    v-if="voiceStore.connectedChannelId || voiceStore.isConnecting || voiceStore.isReconnecting"
     class="border-t border-white/[0.06] bg-[#15161a] px-3 py-2.5 flex items-center gap-2"
   >
     <div class="flex-1 min-w-0">

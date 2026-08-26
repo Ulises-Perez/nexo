@@ -48,6 +48,14 @@ export const useVoiceStore = defineStore('voice', () => {
     // reinicio del backend, laptop suspendida, etc.).
     let hasConnectedBefore = false;
 
+    // Contador de generación: se incrementa en cada intento de unión (manual o
+    // de reingreso automático) y en leaveVoice. Cualquier continuación async
+    // (un sleep de reintento, un callback de ack) que observe que la
+    // generación cambió debe abortar en silencio — así un reintento viejo no
+    // pisa una unión más nueva cuando el usuario cambia de canal, se
+    // desconecta a mano, o un rejoin más reciente lo reemplaza.
+    let intentoDeUnion = 0;
+
     const getParticipants = (channelId: string): VoiceParticipant[] => {
         return voiceStates.value[channelId] ?? [];
     };
@@ -273,7 +281,7 @@ export const useVoiceStore = defineStore('voice', () => {
                 connectedChannelId.value = '';
                 peers.forEach((_, socketId) => destroyPeer(socketId));
                 peers.clear();
-                joinVoice(channelId);
+                rejoinVoice(channelId);
             }
             hasConnectedBefore = true;
         });
@@ -288,6 +296,29 @@ export const useVoiceStore = defineStore('voice', () => {
         });
 
         socket.on('voice_joined', (data: { channelId: string; peers: VoiceParticipant[] }) => {
+            // Un voice_joined puede llegar tarde: el server tardó más que el
+            // timeout del ack y para cuando responde ya abandonamos (o el
+            // usuario se desconectó a mano). Sin micrófono local no podemos
+            // participar — el audio no viajaría en ninguna dirección y
+            // quedaríamos "en la llamada" sin escuchar ni hablar, justo el
+            // síntoma que este arreglo elimina. localStream en null significa
+            // que pasamos por leaveVoice, o sea que NO estamos en ninguna
+            // llamada: avisarle al server para que nos saque de su roster.
+            if (!localStream) {
+                socket?.emit('leave_voice');
+                return;
+            }
+
+            // Idempotencia: si un ack se perdió pero la unión ya había tenido
+            // éxito, el reintento reemitió join_voice, el server hizo un
+            // leave+rejoin, y este cliente recibe voice_joined dos veces.
+            // createPeer pisaría las entradas del Map sin cerrar la
+            // RTCPeerConnection vieja (quedaría viva y rota). En el flujo
+            // normal de primera unión esto es un no-op inofensivo: peers ya
+            // está vacío.
+            peers.forEach((_, id) => destroyPeer(id));
+            peers.clear();
+
             connectedChannelId.value = data.channelId;
             isConnecting.value = false;
             isReconnecting.value = false;
@@ -350,6 +381,101 @@ export const useVoiceStore = defineStore('voice', () => {
 
     // ===================== Acciones =====================
 
+    // (Re)adquiere el stream local del micrófono. Si ya había un stream vivo
+    // (D5: p. ej. un reingreso automático anterior que nunca pasó por
+    // leaveVoice) lo cierra primero — si no, el anterior queda abierto y
+    // pisado sin liberarse, y el indicador de micrófono del sistema se queda
+    // encendido de más. Las fallas se propagan hacia el llamador.
+    // Devuelve false si otra unión nos superó mientras pedíamos el micrófono
+    // (p. ej. doble click rápido en un canal): en ese caso suelta el stream
+    // recién obtenido en vez de pisar el del intento ganador, que quedaría
+    // vivo y fuera del alcance de cualquier leaveVoice posterior.
+    const acquireLocalStream = async (miIntento: number): Promise<boolean> => {
+        if (localStream) {
+            localStream.getTracks().forEach(t => t.stop());
+            localStream = null;
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        if (miIntento !== intentoDeUnion) {
+            stream.getTracks().forEach(t => t.stop());
+            return false;
+        }
+
+        localStream = stream;
+        if (isMuted.value) {
+            localStream.getAudioTracks().forEach(t => (t.enabled = false));
+        }
+        return true;
+    };
+
+    type ResultadoJoin = 'ok' | 'retryable' | 'permanent-forbidden' | 'permanent-notfound';
+
+    // Emite join_voice con ack (con precedente en chat.ts, send_message) y
+    // traduce la respuesta del servidor a un resultado simple para el caller.
+    const emitJoinWithAck = (channelId: string): Promise<ResultadoJoin> => {
+        return new Promise(resolve => {
+            if (!socket) {
+                // El caller acota esto con su propio deadline/retry.
+                resolve('retryable');
+                return;
+            }
+            socket.timeout(10000).emit(
+                'join_voice',
+                { channelId },
+                (err: Error | null, res?: { ok: boolean; code?: 'not_found' | 'forbidden' | 'error'; retryable?: boolean }) => {
+                    if (err || !res) {
+                        resolve('retryable');
+                        return;
+                    }
+                    if (res.ok) {
+                        resolve('ok');
+                        return;
+                    }
+                    if (res.retryable) {
+                        resolve('retryable');
+                        return;
+                    }
+                    if (res.code === 'forbidden') {
+                        resolve('permanent-forbidden');
+                        return;
+                    }
+                    if (res.code === 'not_found') {
+                        resolve('permanent-notfound');
+                        return;
+                    }
+                    resolve('retryable');
+                }
+            );
+        });
+    };
+
+    // Camino de abandono compartido entre joinVoice y rejoinVoice: salida
+    // limpia y completa + aviso audible y honesto al usuario. No agrega un
+    // botón de "reintentar": el canal de voz mismo es el reintento.
+    const abandonarReconexion = (miIntento: number, mensaje: string) => {
+        // Nunca pisar una unión más nueva (p. ej. el usuario ya reingresó a mano).
+        if (miIntento !== intentoDeUnion) return;
+        leaveVoice(); // ya destruye peers, para el VAD, corta el micrófono y limpia los tres flags
+        // connectedChannelId ya quedó en '' acá, así que el propio sonido de
+        // "wasConnected" de leaveVoice no suena — hay que reproducirlo a mano
+        // para que se note audiblemente que la llamada terminó.
+        playLeaveSound();
+        alert(mensaje);
+    };
+
+    const esperar = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+    // Postgres en Railway suele responder entre 10-30s tras un reinicio; 60s
+    // cubre eso con margen. ~6 intentos por cliente es carga despreciable, y
+    // el deadline garantiza que el estado zombie está acotado.
+    const REINTENTOS_DELAYS_MS = [2000, 4000, 8000, 15000, 15000];
+    const REINTENTO_DEADLINE_MS = 60_000;
+
+    // ±25%: dispersa la tormenta de reconexión (todos los clientes reingresan
+    // a la vez tras un redeploy del backend).
+    const conJitter = (ms: number) => Math.round(ms * (1 + (Math.random() * 0.5 - 0.25)));
+
     const joinVoice = async (channelId: string) => {
         if (!socket) return;
         if (connectedChannelId.value === channelId) return;
@@ -359,21 +485,94 @@ export const useVoiceStore = defineStore('voice', () => {
             leaveVoice();
         }
 
+        const miIntento = ++intentoDeUnion;
         isConnecting.value = true;
+
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            if (isMuted.value) {
-                localStream.getAudioTracks().forEach(t => (t.enabled = false));
-            }
-            socket.emit('join_voice', { channelId });
+            // false = otra unión nos superó mientras pedíamos el micrófono; esa
+            // otra es la dueña del estado ahora, así que cortamos en silencio.
+            if (!(await acquireLocalStream(miIntento))) return;
         } catch (error) {
-            isConnecting.value = false;
             console.error('[Voice] No se pudo acceder al micrófono:', error);
-            alert('No se pudo acceder al micrófono. Revisa los permisos del sistema.');
+            abandonarReconexion(miIntento, 'No se pudo acceder al micrófono. Revisa los permisos del sistema.');
+            return;
+        }
+
+        const resultado = await emitJoinWithAck(channelId);
+        if (miIntento !== intentoDeUnion) return;
+
+        if (resultado === 'ok') return; // el handler de voice_joined completa la unión
+
+        const mensajes: Record<Exclude<ResultadoJoin, 'ok'>, string> = {
+            'permanent-forbidden': 'No tenés acceso a este canal de voz.',
+            'permanent-notfound': 'Este canal de voz ya no existe.',
+            retryable: 'El servidor no respondió. Probá de nuevo.',
+        };
+        abandonarReconexion(miIntento, mensajes[resultado]);
+    };
+
+    // Reingreso automático tras una reconexión de socket (drop de red, redeploy
+    // del backend, laptop suspendida). A diferencia de joinVoice (unión manual,
+    // un solo intento, falla rápido), reintenta con backoff acotado — un fallo
+    // transitorio de DB justo después de un restart no debe dejar al usuario
+    // colgado en "Reconectando..." para siempre.
+    const rejoinVoice = async (channelId: string) => {
+        const miIntento = ++intentoDeUnion;
+        isReconnecting.value = true;
+        // Mantiene pasable el guard de salida temprana de leaveVoice y el panel visible.
+        isConnecting.value = true;
+
+        try {
+            // false = otra unión nos superó mientras pedíamos el micrófono.
+            if (!(await acquireLocalStream(miIntento))) return;
+        } catch (error) {
+            console.error('[Voice] No se pudo acceder al micrófono al reingresar:', error);
+            abandonarReconexion(miIntento, 'No se pudo acceder al micrófono. Revisa los permisos del sistema.');
+            return;
+        }
+
+        const inicio = Date.now();
+        let intentoIndex = 0;
+
+        while (true) {
+            if (miIntento !== intentoDeUnion) return; // un rejoin/leave/join más nuevo nos superó
+            if (connectedChannelId.value === channelId) return; // ya conectados por otra vía (un voice_joined llegó entre intentos)
+
+            const resultado = await emitJoinWithAck(channelId);
+            if (miIntento !== intentoDeUnion) return;
+
+            if (resultado === 'ok') return; // el handler de voice_joined completa la unión
+
+            if (resultado === 'permanent-forbidden' || resultado === 'permanent-notfound') {
+                // Reintentar contra un rechazo real estaría mal.
+                abandonarReconexion(
+                    miIntento,
+                    resultado === 'permanent-forbidden'
+                        ? 'No tenés acceso a este canal de voz.'
+                        : 'Este canal de voz ya no existe.'
+                );
+                return;
+            }
+
+            // resultado === 'retryable'
+            const excedioDeadline = Date.now() - inicio >= REINTENTO_DEADLINE_MS;
+            const sinIntentosRestantes = intentoIndex >= REINTENTOS_DELAYS_MS.length;
+            if (excedioDeadline || sinIntentosRestantes) {
+                abandonarReconexion(miIntento, 'El servidor no respondió. Probá de nuevo.');
+                return;
+            }
+
+            await esperar(conJitter(REINTENTOS_DELAYS_MS[intentoIndex]));
+            intentoIndex++;
         }
     };
 
     const leaveVoice = () => {
+        // Invalida cualquier intento de unión en vuelo (un sleep de reintento,
+        // un callback de ack): salir de voz siempre debe poder cortar un
+        // rejoin en curso, sin importar si había algo conectado.
+        intentoDeUnion++;
+
         if (!connectedChannelId.value && !isConnecting.value) return;
 
         const wasConnected = !!connectedChannelId.value;

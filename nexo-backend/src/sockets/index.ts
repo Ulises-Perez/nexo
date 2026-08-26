@@ -16,41 +16,41 @@ const userSockets = new Map<string, Set<string>>();
 
 // Verificar si el usuario es miembro de la comunidad del canal
 async function isUserMemberOfChannel(userId: string, channelId: string): Promise<boolean> {
-    try {
-        const channel = await prisma.channel.findUnique({
-            where: { id: channelId },
-            include: {
-                category: {
-                    include: {
-                        community: {
-                            include: {
-                                members: {
-                                    where: { userId }
-                                }
+    // Nota: ya no atrapa errores de DB acá (ver decisión D2) — un error
+    // transitorio (p. ej. Postgres reiniciando) debe propagarse como excepción
+    // en vez de confundirse con un "false" honesto de acceso denegado. Los dos
+    // callers (join_channel, join_voice) ya están dentro de su propio try/catch.
+    const channel = await prisma.channel.findUnique({
+        where: { id: channelId },
+        include: {
+            category: {
+                include: {
+                    community: {
+                        include: {
+                            members: {
+                                where: { userId }
                             }
                         }
                     }
                 }
             }
-        });
-
-        if (!channel) return false;
-
-        // Es un canal DM: solo los dos participantes de la conversación pueden acceder
-        if (channel.type === 'dm') {
-            const conversation = await prisma.conversation.findUnique({
-                where: { channelId },
-                select: { userAId: true, userBId: true }
-            });
-            if (!conversation) return false;
-            return conversation.userAId === userId || conversation.userBId === userId;
         }
+    });
 
-        // Verificar si es miembro de la comunidad
-        return channel.category?.community?.members?.some(m => m.userId === userId) ?? false;
-    } catch {
-        return false;
+    if (!channel) return false;
+
+    // Es un canal DM: solo los dos participantes de la conversación pueden acceder
+    if (channel.type === 'dm') {
+        const conversation = await prisma.conversation.findUnique({
+            where: { channelId },
+            select: { userAId: true, userBId: true }
+        });
+        if (!conversation) return false;
+        return conversation.userAId === userId || conversation.userBId === userId;
     }
+
+    // Verificar si es miembro de la comunidad
+    return channel.category?.community?.members?.some(m => m.userId === userId) ?? false;
 }
 
 // Access-check + delivery target for send_message, collapsed into a single
@@ -440,19 +440,57 @@ export const setupSockets = (io: Server) => {
             }
         };
 
-        socket.on('join_voice', async (data: { channelId: string }) => {
+        socket.on('join_voice', async (
+            data: { channelId: string },
+            ack?: (res: { ok: boolean; code?: 'not_found' | 'forbidden' | 'error'; retryable?: boolean }) => void
+        ) => {
+            // Mismo guard anti-doble-ack que send_message: clientes viejos no
+            // mandan ack, y el catch de abajo no debe pisar una respuesta ya enviada.
+            let acked = false;
+            const respond = (res: { ok: boolean; code?: 'not_found' | 'forbidden' | 'error'; retryable?: boolean }) => {
+                if (acked) return;
+                acked = true;
+                ack?.(res);
+            };
+
             try {
                 const { channelId } = data;
-                if (!channelId) return;
+                if (!channelId) {
+                    respond({ ok: false, code: 'not_found', retryable: false });
+                    return;
+                }
 
                 const channel = await prisma.channel.findUnique({ where: { id: channelId } });
-                if (!channel || channel.type !== 'voice') return;
+                if (!channel || channel.type !== 'voice') {
+                    respond({ ok: false, code: 'not_found', retryable: false });
+                    return;
+                }
 
                 const hasAccess = await isUserMemberOfChannel(userId, channelId);
-                if (!hasAccess) return;
+                if (!hasAccess) {
+                    console.log(`[Socket.io] User ${userId} sin acceso a canal de voz: ${channelId}`);
+                    respond({ ok: false, code: 'forbidden', retryable: false });
+                    return;
+                }
 
                 // Si ya estaba en otro canal de voz, salir primero
                 await leaveVoice();
+
+                // Repara una sesión degradada: un socket que se conectó con la DB
+                // caída tiene `me === null` y nunca se unió a sus salas
+                // `community:*`. La DB ya probadamente responde (el chequeo de
+                // acceso de arriba pasó), así que si esto tira, cae al catch
+                // externo y responde retryable — correcto.
+                if (!me) {
+                    me = await prisma.user.findUnique({
+                        where: { id: userId },
+                        select: { username: true, avatarUrl: true },
+                    });
+                }
+                const communityId = await getCommunityIdOfChannel(channelId);
+                if (communityId) {
+                    socket.join(`community:${communityId}`);
+                }
 
                 const existingPeers = getVoiceParticipants(channelId);
 
@@ -478,9 +516,14 @@ export const setupSockets = (io: Server) => {
                     peer: newParticipant,
                 });
 
+                // Trabajo principal ya hecho: ack antes del broadcast de estado,
+                // para que una falla en emitVoiceStateUpdate no envenene el ack.
+                respond({ ok: true });
+
                 await emitVoiceStateUpdate(io, channelId);
             } catch (error) {
                 console.error('[Socket.io] Error en join_voice:', error);
+                respond({ ok: false, code: 'error', retryable: true });
             }
         });
 
