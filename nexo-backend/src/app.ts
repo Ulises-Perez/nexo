@@ -1,5 +1,6 @@
 import express, { Application } from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import pingRoutes from './routes/ping.routes';
 import authRoutes from './routes/auth.routes';
 import userRoutes from './routes/user.routes';
@@ -25,6 +26,7 @@ const corsOptions: cors.CorsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use(compression());
 app.use(express.json());
 
 // Declaración de Rutas

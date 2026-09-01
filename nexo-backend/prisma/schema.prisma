@@ -68,6 +68,7 @@ model CommunityMember {
   community    Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
   roles        MemberRole[]
   @@unique([userId, communityId])
+  @@index([communityId])
 }
 model Role {
   id          String       @id @default(uuid())
@@ -88,6 +89,7 @@ model MemberRole {
   member   CommunityMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
   role     Role            @relation(fields: [roleId], references: [id], onDelete: Cascade)
   @@unique([memberId, roleId])
+  @@index([roleId])
 }
 model CommunityBan {
   id          String    @id @default(uuid())

@@ -587,36 +587,60 @@ export class FriendController {
 
             const channelIds = conversations.map(c => c.channelId);
 
-            const unreadData = await prisma.message.findMany({
-                where: {
-                    channelId: { in: channelIds },
-                    userId: { not: userId },
-                    readAt: null
-                },
-                orderBy: { createdAt: 'desc' },
-                select: {
-                    channelId: true,
-                    content: true,
-                    userId: true,
-                    createdAt: true
-                }
-            });
-
-            // Group by channelId to get last unread per channel
+            // Group by channelId to get the unread count and the timestamp of the
+            // last unread message per channel without loading every unread row.
             const lastUnreadByChannel = new Map<string, { content: string; isMine: boolean; createdAt: Date }>();
             const unreadCountsMap = new Map<string, number>();
 
-            unreadData.forEach(msg => {
-                if (!lastUnreadByChannel.has(msg.channelId)) {
-                    lastUnreadByChannel.set(msg.channelId, {
-                        content: msg.content,
-                        isMine: false,
-                        createdAt: msg.createdAt
+            if (channelIds.length > 0) {
+                const unreadGroups = await prisma.message.groupBy({
+                    by: ['channelId'],
+                    where: {
+                        channelId: { in: channelIds },
+                        userId: { not: userId },
+                        readAt: null
+                    },
+                    _count: { _all: true },
+                    _max: { createdAt: true }
+                });
+
+                unreadGroups.forEach(g => {
+                    unreadCountsMap.set(g.channelId, g._count._all);
+                });
+
+                if (unreadGroups.length > 0) {
+                    // Fetch only the last unread message's content per channel,
+                    // matched by the createdAt found above.
+                    const lastUnreadMessages = await prisma.message.findMany({
+                        where: {
+                            OR: unreadGroups.map(g => ({
+                                channelId: g.channelId,
+                                userId: { not: userId },
+                                readAt: null,
+                                createdAt: g._max.createdAt as Date
+                            }))
+                        },
+                        select: {
+                            channelId: true,
+                            content: true,
+                            createdAt: true
+                        }
+                    });
+
+                    lastUnreadMessages.forEach(msg => {
+                        // If two messages in the same channel share the exact same
+                        // createdAt, keep the first one encountered (same approximate
+                        // behavior as before).
+                        if (!lastUnreadByChannel.has(msg.channelId)) {
+                            lastUnreadByChannel.set(msg.channelId, {
+                                content: msg.content,
+                                isMine: false,
+                                createdAt: msg.createdAt
+                            });
+                        }
                     });
                 }
-                const count = unreadCountsMap.get(msg.channelId) || 0;
-                unreadCountsMap.set(msg.channelId, count + 1);
-            });
+            }
 
             const result = conversations.map((conv) => {
                 const friend = conv.userAId === userId ? conv.userB : conv.userA;
