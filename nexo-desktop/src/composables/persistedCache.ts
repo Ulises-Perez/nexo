@@ -9,6 +9,7 @@
 export const MESSAGE_CACHE_KEY = 'nexo_cache_messages_v1';
 export const DM_PROFILE_CACHE_KEY = 'nexo_cache_dm_profiles_v1';
 export const COMMUNITY_MEMBERS_CACHE_KEY = 'nexo_cache_community_members_v1';
+export const VOICE_USER_AUDIO_CACHE_KEY = 'nexo_voice_user_audio_v1';
 
 export const hydrateCache = <T>(key: string, version: number): T | null => {
     try {

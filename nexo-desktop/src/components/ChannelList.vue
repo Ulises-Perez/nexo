@@ -84,8 +84,9 @@
             <li
               v-for="participant in voiceParticipants(channel.id)"
               :key="participant.socketId"
-              @click="profileStore.open(participant.userId, communityId)"
-              class="flex items-center gap-2 px-2 py-1 text-gray-400 rounded cursor-pointer hover:bg-white/[0.04] hover:text-gray-200 transition-colors"
+              @click="openMenu(participant, $event)"
+              @contextmenu.prevent.stop="openMenu(participant, $event)"
+              class="group/p flex items-center gap-2 px-2 py-1 text-gray-400 rounded cursor-pointer hover:bg-white/[0.04] hover:text-gray-200 transition-colors"
             >
               <!-- Borde verde completo mientras el usuario habla -->
               <div
@@ -102,8 +103,23 @@
               </div>
               <span
                 class="text-[13px] truncate flex-1 transition-colors"
-                :class="{ 'text-gray-100': voiceStore.isSpeaking(participant.socketId) }"
+                :class="{
+                  'text-gray-100': voiceStore.isSpeaking(participant.socketId),
+                  'text-gray-500': voiceStore.isLocallyMuted(participant.userId)
+                }"
               >{{ participant.username }}</span>
+              <!-- Silenciado localmente para mí (distinto del mic-muteado de abajo) -->
+              <svg
+                v-if="voiceStore.isLocallyMuted(participant.userId)"
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 text-gray-500 flex-shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <title>Silenciado para vos</title>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2.5 2.5M19.5 14L17 16.5M11 5L6 9H2v6h4l5 4V5z" />
+              </svg>
               <svg v-if="participant.muted" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-red-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 5.586A2 2 0 005 7v4a7 7 0 0011.95 4.95M15 9.34V5a3 3 0 00-5.94-.6M12 18v4m0 0H8m4 0h4M3 3l18 18" />
               </svg>
@@ -117,6 +133,19 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
               </button>
+
+              <VoiceParticipantMenu
+                v-if="openMenuFor && openMenuFor.socketId === participant.socketId"
+                :participant="participant"
+                :volume="voiceStore.getUserVolume(participant.userId)"
+                :is-locally-muted="voiceStore.isLocallyMuted(participant.userId)"
+                :anchor="{ top: openMenuFor.top, left: openMenuFor.left }"
+                :trigger-el="openMenuFor.triggerEl"
+                @update:volume="voiceStore.setUserVolume(participant.userId, $event)"
+                @toggle-mute="voiceStore.toggleLocalMute(participant.userId)"
+                @view-profile="handleViewProfile(participant)"
+                @close="openMenuFor = null"
+              />
             </li>
           </ul>
         </li>
@@ -141,7 +170,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useCommunityStore, Permissions } from '../stores/community';
 import type { Channel, Category } from '../stores/community';
 import { useVoiceStore } from '../stores/voice';
@@ -151,6 +180,7 @@ import { useUserProfileStore } from '../stores/userProfile';
 import UserAvatar from './UserAvatar.vue';
 import ChannelSettingsModal from './ChannelSettingsModal.vue';
 import CategorySettingsModal from './CategorySettingsModal.vue';
+import VoiceParticipantMenu from './VoiceParticipantMenu.vue';
 
 const props = defineProps<{
   categories: Category[];
@@ -170,6 +200,7 @@ const profileStore = useUserProfileStore();
 
 const settingsChannel = ref<Channel | null>(null);
 const settingsCategory = ref<Category | null>(null);
+const openMenuFor = ref<{ socketId: string; top: number; left: number; triggerEl: HTMLElement } | null>(null);
 
 const canManageChannels = computed(() => communityStore.can(Permissions.MANAGE_CHANNELS, props.communityId));
 
@@ -179,6 +210,53 @@ const watchParticipant = (participant: VoiceParticipant) => {
   if (!participant.shareId) return;
   screenShareStore.watchShare(participant.socketId, participant.shareId, participant.username);
 };
+
+// Abre el menú de opciones de un participante: click en la fila (acción
+// principal en un canal de voz) o click derecho (posicionado en el cursor).
+// En el propio participante no hay nada que ajustar (no te vas a mutear vos
+// mismo desde acá), así que la fila abre directamente el perfil, como antes.
+// Click sobre la fila que ya tiene el menú abierto lo cierra (toggle) en vez
+// de reabrirlo.
+const openMenu = (participant: VoiceParticipant, event: MouseEvent) => {
+  if (participant.socketId === voiceStore.ownSocketId()) {
+    profileStore.open(participant.userId, props.communityId);
+    return;
+  }
+
+  if (openMenuFor.value?.socketId === participant.socketId) {
+    openMenuFor.value = null;
+    return;
+  }
+
+  const triggerEl = event.currentTarget as HTMLElement;
+
+  if (event.type === 'contextmenu') {
+    openMenuFor.value = { socketId: participant.socketId, top: event.clientY, left: event.clientX, triggerEl };
+    return;
+  }
+
+  const rect = triggerEl.getBoundingClientRect();
+  openMenuFor.value = { socketId: participant.socketId, top: rect.top, left: rect.right + 8, triggerEl };
+};
+
+const handleViewProfile = (participant: VoiceParticipant) => {
+  profileStore.open(participant.userId, props.communityId);
+  openMenuFor.value = null;
+};
+
+// Si el participante con el menú abierto se desconecta del canal, cerramos
+// el menú para no dejarlo apuntando a alguien que ya no está.
+watch(
+  () => voiceStore.voiceStates,
+  () => {
+    if (!openMenuFor.value) return;
+    const stillPresent = Object.values(voiceStore.voiceStates).some(participants =>
+      participants.some(p => p.socketId === openMenuFor.value!.socketId)
+    );
+    if (!stillPresent) openMenuFor.value = null;
+  },
+  { deep: true }
+);
 
 const isChannelActive = (channel: Channel): boolean => {
   if (channel.type === 'voice') return voiceStore.connectedChannelId === channel.id;

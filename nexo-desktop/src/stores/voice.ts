@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import type { Socket } from 'socket.io-client';
+import { hydrateCache, persistCache, VOICE_USER_AUDIO_CACHE_KEY } from '../composables/persistedCache';
 
 export interface VoiceParticipant {
     socketId: string;
@@ -38,6 +39,53 @@ export const useVoiceStore = defineStore('voice', () => {
     // Quién está hablando ahora mismo: socketId -> true
     const speaking = ref<Record<string, boolean>>({});
 
+    // Ajustes de audio locales por usuario (no afectan a nadie más ni al
+    // servidor): volumen 0..100 (ausente = 100, default) y mute local
+    // (presente = muteado para mí). Claveados por userId, no por socketId,
+    // porque el socketId cambia en cada reconexión y estos ajustes deben
+    // sobrevivir a eso.
+    const cachedUserAudio = hydrateCache<{ volumes: Record<string, number>; mutes: Record<string, true> }>(
+        VOICE_USER_AUDIO_CACHE_KEY,
+        1
+    );
+    const sanitizedVolumes: Record<string, number> = {};
+    if (cachedUserAudio?.volumes) {
+        for (const [userId, vol] of Object.entries(cachedUserAudio.volumes)) {
+            if (typeof vol === 'number' && Number.isFinite(vol) && vol >= 0 && vol <= 100) {
+                sanitizedVolumes[userId] = vol;
+            }
+        }
+    }
+    const sanitizedMutes: Record<string, true> = {};
+    if (cachedUserAudio?.mutes) {
+        for (const userId of Object.keys(cachedUserAudio.mutes)) {
+            if (cachedUserAudio.mutes[userId]) sanitizedMutes[userId] = true;
+        }
+    }
+    const userVolumes = ref<Record<string, number>>(sanitizedVolumes);
+    const localMutes = ref<Record<string, true>>(sanitizedMutes);
+
+    // Persistir estos ajustes es debounced (no write-through): setUserVolume
+    // se llama en cada tick de un slider.
+    let persistUserAudioTimer: ReturnType<typeof setTimeout> | null = null;
+    const schedulePersistUserAudio = () => {
+        if (persistUserAudioTimer) clearTimeout(persistUserAudioTimer);
+        persistUserAudioTimer = setTimeout(() => {
+            persistUserAudioTimer = null;
+            // Solo se persisten las entradas que no están en su default: un
+            // volumen en 100 o un mute ausente no aportan nada al hidratar.
+            const volumes: Record<string, number> = {};
+            for (const [userId, vol] of Object.entries(userVolumes.value)) {
+                if (vol !== 100) volumes[userId] = vol;
+            }
+            const mutes: Record<string, true> = {};
+            for (const [userId, muted] of Object.entries(localMutes.value)) {
+                if (muted) mutes[userId] = true;
+            }
+            persistCache(VOICE_USER_AUDIO_CACHE_KEY, 1, { volumes, mutes });
+        }, 150);
+    };
+
     // Objetos WebRTC (fuera de la reactividad de Vue)
     let socket: Socket | null = null;
     let localStream: MediaStream | null = null;
@@ -63,6 +111,27 @@ export const useVoiceStore = defineStore('voice', () => {
     const isSpeaking = (socketId: string): boolean => {
         return !!speaking.value[socketId];
     };
+
+    // Traduce el socketId de un peer (efímero, cambia en cada reconexión) a
+    // su userId (estable) usando el roster del canal conectado actualmente.
+    const userIdForSocket = (socketId: string): string | undefined =>
+        (voiceStates.value[connectedChannelId.value] ?? []).find(p => p.socketId === socketId)?.userId;
+
+    // Aplica volumen + mute (local, por-usuario) y deafen (global) al <audio>
+    // de un peer. Punto central que reemplaza la lógica de mute dispersa que
+    // antes solo vivía en toggleDeafen y en pc.ontrack: el mute local
+    // sobrevive al toggle de deafen (al desensordecer, vuelven a sonar todos
+    // menos los que tienen mute local activo).
+    const applyOutputState = (socketId: string) => {
+        const audio = audioElements.get(socketId);
+        if (!audio) return;
+        const userId = userIdForSocket(socketId);
+        const vol = userId !== undefined ? (userVolumes.value[userId] ?? 100) : 100;
+        audio.volume = vol / 100;
+        audio.muted = isDeafened.value || (userId !== undefined && !!localMutes.value[userId]);
+    };
+
+    const applyAllOutputState = () => audioElements.forEach((_, socketId) => applyOutputState(socketId));
 
     const ownSocketId = (): string | undefined => socket?.id;
 
@@ -105,6 +174,7 @@ export const useVoiceStore = defineStore('voice', () => {
 
     const analysers = new Map<string, AnalyserNode>();
     const vadSources = new Map<string, MediaStreamAudioSourceNode>();
+    const vadBuffers = new Map<string, Uint8Array>();
     const lastSpoke = new Map<string, number>();
     let vadTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -121,6 +191,9 @@ export const useVoiceStore = defineStore('voice', () => {
             source.connect(analyser);
             vadSources.set(socketId, source);
             analysers.set(socketId, analyser);
+            // Alocado una sola vez acá, no en cada tick del loop de VAD, para
+            // no presionar al GC con un peer más ni con más frecuencia.
+            vadBuffers.set(socketId, new Uint8Array(analyser.fftSize));
             startVadLoop();
         } catch (error) {
             console.error('[Voice] No se pudo analizar el audio:', error);
@@ -131,6 +204,7 @@ export const useVoiceStore = defineStore('voice', () => {
         vadSources.get(socketId)?.disconnect();
         vadSources.delete(socketId);
         analysers.delete(socketId);
+        vadBuffers.delete(socketId);
         lastSpoke.delete(socketId);
         delete speaking.value[socketId];
         if (analysers.size === 0) stopVadLoop();
@@ -141,7 +215,8 @@ export const useVoiceStore = defineStore('voice', () => {
         vadTimer = setInterval(() => {
             const now = Date.now();
             analysers.forEach((analyser, socketId) => {
-                const data = new Uint8Array(analyser.fftSize);
+                const data = vadBuffers.get(socketId);
+                if (!data) return;
                 analyser.getByteTimeDomainData(data);
                 let sum = 0;
                 for (let i = 0; i < data.length; i++) {
@@ -194,7 +269,7 @@ export const useVoiceStore = defineStore('voice', () => {
                 audioElements.set(remoteSocketId, audio);
             }
             audio.srcObject = stream;
-            audio.muted = isDeafened.value;
+            applyOutputState(remoteSocketId);
 
             // Analizar el audio remoto para el indicador de "hablando"
             watchStream(remoteSocketId, stream);
@@ -349,12 +424,28 @@ export const useVoiceStore = defineStore('voice', () => {
 
         socket.on('voice_signal', handleSignal);
 
+        socket.on('voice_session_replaced', (_data: { channelId: string }) => {
+            // Nos unimos a voz desde otra instancia (navegador / otra PC): el
+            // server ya nos sacó de la llamada. Desmontar sin avisarle de vuelta
+            // (sería redundante, el server ya lo sabe).
+            const estabaEnVoz = !!connectedChannelId.value || isConnecting.value;
+            tearDownVoice({ notifyServer: false });
+            if (estabaEnVoz) {
+                alert('Te uniste a voz desde otro dispositivo. Esta sesión se desconectó de la llamada.');
+            }
+        });
+
         socket.on('voice_state_update', (data: { channelId: string; participants: VoiceParticipant[] }) => {
             if (data.participants.length === 0) {
                 delete voiceStates.value[data.channelId];
             } else {
                 voiceStates.value[data.channelId] = data.participants;
             }
+            // Cierra la carrera donde pc.ontrack se dispara antes de que
+            // voiceStates conozca el userId de ese socket: sin esto, un audio
+            // recién creado podría aplicar volumen/mute de default (100,
+            // sin mute) en vez del ajuste local guardado para ese usuario.
+            applyAllOutputState();
         });
     };
 
@@ -395,12 +486,18 @@ export const useVoiceStore = defineStore('voice', () => {
             localStream.getTracks().forEach(t => t.stop());
             localStream = null;
         }
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
 
         if (miIntento !== intentoDeUnion) {
             stream.getTracks().forEach(t => t.stop());
             return false;
         }
+
+        // 'speech' le indica al pipeline WebRTC/OS que priorice inteligibilidad
+        // de voz por sobre fidelidad musical en el procesamiento de la señal.
+        stream.getAudioTracks().forEach(t => (t.contentHint = 'speech'));
 
         localStream = stream;
         if (isMuted.value) {
@@ -567,7 +664,11 @@ export const useVoiceStore = defineStore('voice', () => {
         }
     };
 
-    const leaveVoice = () => {
+    // Cuerpo real de leaveVoice, parametrizado para poder desmontar la
+    // llamada sin avisarle al server (p. ej. cuando el propio server ya nos
+    // sacó de voz porque nos unimos desde otra instancia: reemitir
+    // leave_voice ahí sería redundante).
+    const tearDownVoice = ({ notifyServer }: { notifyServer: boolean }) => {
         // Invalida cualquier intento de unión en vuelo (un sleep de reintento,
         // un callback de ack): salir de voz siempre debe poder cortar un
         // rejoin en curso, sin importar si había algo conectado.
@@ -577,7 +678,7 @@ export const useVoiceStore = defineStore('voice', () => {
 
         const wasConnected = !!connectedChannelId.value;
 
-        socket?.emit('leave_voice');
+        if (notifyServer) socket?.emit('leave_voice');
 
         peers.forEach((_, socketId) => destroyPeer(socketId));
         peers.clear();
@@ -599,6 +700,8 @@ export const useVoiceStore = defineStore('voice', () => {
         if (wasConnected) playLeaveSound();
     };
 
+    const leaveVoice = () => tearDownVoice({ notifyServer: true });
+
     const toggleMute = () => {
         isMuted.value = !isMuted.value;
         if (localStream) {
@@ -609,12 +712,42 @@ export const useVoiceStore = defineStore('voice', () => {
 
     const toggleDeafen = () => {
         isDeafened.value = !isDeafened.value;
-        audioElements.forEach(audio => (audio.muted = isDeafened.value));
+        applyAllOutputState();
         // Al ensordecer también se silencia el micrófono (como Discord)
         if (isDeafened.value && !isMuted.value) {
             toggleMute();
         }
     };
+
+    // ===================== Ajustes locales de audio por usuario =====================
+    // Nunca se limpian al desconectar un peer (destroyPeer) ni al salir del
+    // canal: sobreviven a reconexiones e incluso a salir/reentrar, porque
+    // están claveados por userId, no por socketId.
+
+    const setUserVolume = (userId: string, volume: number): void => {
+        const clamped = Math.min(100, Math.max(0, Math.round(volume)));
+        if (clamped === 100) {
+            delete userVolumes.value[userId];
+        } else {
+            userVolumes.value[userId] = clamped;
+        }
+        applyAllOutputState();
+        schedulePersistUserAudio();
+    };
+
+    const getUserVolume = (userId: string): number => userVolumes.value[userId] ?? 100;
+
+    const toggleLocalMute = (userId: string): void => {
+        if (localMutes.value[userId]) {
+            delete localMutes.value[userId];
+        } else {
+            localMutes.value[userId] = true;
+        }
+        applyAllOutputState();
+        schedulePersistUserAudio();
+    };
+
+    const isLocallyMuted = (userId: string): boolean => !!localMutes.value[userId];
 
     return {
         connectedChannelId,
@@ -634,5 +767,9 @@ export const useVoiceStore = defineStore('voice', () => {
         leaveVoice,
         toggleMute,
         toggleDeafen,
+        setUserVolume,
+        getUserVolume,
+        toggleLocalMute,
+        isLocallyMuted,
     };
 });
