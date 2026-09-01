@@ -29,6 +29,12 @@ export interface PendingAttachment {
     objectKey?: string;
     cdnUrl?: string;
     error?: string;
+    // Object URL local para previsualizar antes de subir (solo image/video).
+    // Se crea una vez al agregar el adjunto y se reutiliza en todos los
+    // estados (pending/uploading/completed) — nunca se recrea en cada
+    // render. Debe revocarse explícitamente (removePendingAttachment /
+    // clearCompletedAttachments) para no filtrar memoria.
+    previewUrl?: string;
 }
 
 export interface ChatMessage {
@@ -103,6 +109,16 @@ export const useChatStore = defineStore('chat', () => {
 
     // Tamaño de página de mensajes (debe coincidir con el clamp del backend).
     const PAGE_SIZE = 50;
+
+    // Tope de mensajes en memoria por canal, aplicado SOLO al paginar hacia
+    // atrás (loadOlderMessages) para acotar el peor caso de un usuario que
+    // scrollea mucho historial en una sesión larga. Generoso a propósito
+    // (20 páginas de PAGE_SIZE): recortar por el extremo reciente deja un
+    // "agujero" entre lo cacheado y el presente si el usuario luego vuelve a
+    // bajar del todo (no hay loadNewerMessages para rellenarlo, solo
+    // fetchMessages/revalidateMessages que traen la última página). Un límite
+    // alto hace ese caso extremadamente infrecuente en uso normal.
+    const MAX_MESSAGES_IN_MEMORY = 1000;
 
     // Persistir el cache de mensajes es debounced (no write-through): el
     // socket puede mutarlo varias veces por segundo y esto es una app de
@@ -321,7 +337,18 @@ export const useChatStore = defineStore('chat', () => {
             const current = withoutPendingEchoes(messageCache.value.get(channelId) ?? []);
             const merged = mergeById(data, current);
             const prepended = merged.length - current.length;
-            touchCacheEntry(channelId, merged);
+            // `merged` está ascendente (más viejo -> más nuevo, ver mergeById):
+            // el índice 0 es el mensaje más viejo, que es justo el que el
+            // usuario acaba de pedir viendo. Si excede el tope, se recorta por
+            // el extremo MÁS RECIENTE (el final del array) para conservar
+            // siempre lo que el usuario está mirando ahora; lo recortado hacia
+            // el presente puede volver a pedirse (fetch/revalidate) si hace falta.
+            // `prepended` se calcula ANTES de recortar: cuenta mensajes viejos
+            // realmente agregados al frente y no lo afecta un recorte del final.
+            const capped = merged.length > MAX_MESSAGES_IN_MEMORY
+                ? merged.slice(0, MAX_MESSAGES_IN_MEMORY)
+                : merged;
+            touchCacheEntry(channelId, capped);
             hasMoreOlder.value.set(channelId, data.length === PAGE_SIZE);
             return prepended;
         } catch (error: any) {
@@ -1036,7 +1063,11 @@ export const useChatStore = defineStore('chat', () => {
             id,
             file,
             type,
-            status: 'pending'
+            status: 'pending',
+            // Solo image/video muestran <img>/<video src>; audio y file
+            // genéricos no usan previewUrl, así que no vale la pena crear
+            // (y tener que revocar) un object URL para ellos.
+            previewUrl: (type === 'image' || type === 'video') ? URL.createObjectURL(file) : undefined
         };
 
         pendingAttachments.value.push(attachment);
@@ -1105,11 +1136,15 @@ export const useChatStore = defineStore('chat', () => {
     function removePendingAttachment(id: string) {
         const index = pendingAttachments.value.findIndex(a => a.id === id);
         if (index !== -1) {
-            pendingAttachments.value.splice(index, 1);
+            const [removed] = pendingAttachments.value.splice(index, 1);
+            if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
         }
     }
 
     function clearCompletedAttachments() {
+        for (const a of pendingAttachments.value) {
+            if (a.status === 'completed' && a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+        }
         pendingAttachments.value = pendingAttachments.value.filter(a => a.status !== 'completed');
     }
 

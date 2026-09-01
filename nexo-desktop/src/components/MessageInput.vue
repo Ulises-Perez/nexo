@@ -18,7 +18,7 @@
           <!-- Image preview -->
           <div v-if="attachment.type === 'image' && attachment.status !== 'uploading'" class="relative">
             <img
-              :src="getPreviewUrl(attachment.file)"
+              :src="attachment.previewUrl"
               class="w-32 h-32 object-cover rounded-lg"
             />
             <button
@@ -33,7 +33,7 @@
           <!-- Video preview -->
           <div v-else-if="attachment.type === 'video' && attachment.status !== 'uploading'" class="relative">
             <video
-              :src="getPreviewUrl(attachment.file)"
+              :src="attachment.previewUrl"
               class="w-32 h-32 object-cover rounded-lg"
               muted
             />
@@ -168,6 +168,7 @@ interface PendingAttachment {
   objectKey?: string;
   cdnUrl?: string;
   error?: string;
+  previewUrl?: string;
 }
 
 const props = defineProps<{
@@ -195,10 +196,6 @@ const canSend = computed(() => {
   if (hasAttachmentsInFlight) return false;
   return (hasContent || hasCompletedAttachments) && props.isInputEnabled;
 });
-
-const getPreviewUrl = (file: File): string => {
-  return window.URL.createObjectURL(file);
-};
 
 const handleSubmit = () => {
   const content = localMessage.value.trim();

@@ -16,6 +16,7 @@
       <!-- Message row -->
       <div
         class="channel-msg group relative flex px-4 py-0.5 transition-colors duration-100 hover:bg-white/[0.02]"
+        :data-msg-id="msg.id"
         :class="[
           index > 0 && messages[index - 1].userId === msg.userId && isSameDay(msg.createdAt, messages[index - 1].createdAt) && !isTimeDiffLarge(msg.createdAt, messages[index - 1].createdAt)
             ? ''

@@ -430,6 +430,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  document.removeEventListener('click', closeDropdown);
   screenShareStore.unbindSocket();
   voiceStore.unbindSocket();
   chatStore.disconnectSocket();

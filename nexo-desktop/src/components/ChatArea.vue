@@ -176,6 +176,7 @@ interface PendingAttachment {
   status: 'pending' | 'uploading' | 'completed' | 'error';
   objectKey?: string;
   cdnUrl?: string;
+  previewUrl?: string;
 }
 
 const props = defineProps<{
@@ -263,6 +264,17 @@ const handleScroll = async () => {
   ) {
     isLoadingOlder.value = true;
     const prevHeight = el.scrollHeight;
+    // Mensaje ancla: el primero actualmente visible en el viewport, identificado
+    // por su id de DOM. Anclar por elemento (en vez de por diferencia de altura
+    // total) sigue siendo correcto aunque el store recorte mensajes recientes
+    // del otro extremo del array (tope MAX_MESSAGES_IN_MEMORY en chat.ts) — ese
+    // recorte nunca toca los mensajes viejos cercanos al ancla.
+    const containerRectBefore = el.getBoundingClientRect();
+    const anchorEl = Array.from(el.querySelectorAll<HTMLElement>('[data-msg-id]')).find(
+      candidate => candidate.getBoundingClientRect().bottom > containerRectBefore.top
+    );
+    const anchorId = anchorEl?.dataset.msgId;
+    const anchorOffset = anchorEl ? anchorEl.getBoundingClientRect().top - containerRectBefore.top : null;
     // Canal al que pertenece esta carga: si el usuario cambia de canal mientras
     // está en vuelo, no aplicamos la restauración de scroll al canal nuevo.
     const loadingChannelId = activeId.value;
@@ -270,8 +282,18 @@ const handleScroll = async () => {
       const prepended = await chatStore.loadOlderMessages(loadingChannelId);
       if (prepended > 0 && activeId.value === loadingChannelId) {
         await nextTick();
-        // Anclar el viewport al mismo mensaje: el alto creció por el prepend.
-        el.scrollTop = el.scrollHeight - prevHeight;
+        const newAnchorEl = anchorId
+          ? el.querySelector<HTMLElement>(`[data-msg-id="${anchorId}"]`)
+          : null;
+        if (newAnchorEl && anchorOffset !== null) {
+          // Restaurar el mismo mensaje a la misma posición relativa al viewport.
+          const containerRectAfter = el.getBoundingClientRect();
+          const newAnchorOffset = newAnchorEl.getBoundingClientRect().top - containerRectAfter.top;
+          el.scrollTop += newAnchorOffset - anchorOffset;
+        } else {
+          // Fallback: sin ancla identificable, usar la diferencia de altura total.
+          el.scrollTop = el.scrollHeight - prevHeight;
+        }
       }
     } finally {
       isLoadingOlder.value = false;
