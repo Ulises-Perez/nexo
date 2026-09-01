@@ -7,6 +7,7 @@ import {
     removeVoiceParticipant,
     getVoiceParticipants,
     findVoiceChannelOfSocket,
+    findVoiceSessionsOfUser,
     setParticipantMuted,
     setParticipantSharing,
     getVoiceStates,
@@ -67,6 +68,17 @@ type SendContext =
 // SEND_CONTEXT_TTL_MS afterwards.
 const sendContextCache = new Map<string, { ctx: SendContext; expiresAt: number }>();
 const SEND_CONTEXT_TTL_MS = 30_000;
+
+// Purga periódica de entradas vencidas — sin esto el Map crece sin límite
+// (una entrada por par userId:channelId visto alguna vez) porque las lecturas
+// solo ignoran las entradas vencidas, no las borran.
+const SEND_CONTEXT_PURGE_INTERVAL_MS = 5 * 60_000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of sendContextCache) {
+        if (entry.expiresAt <= now) sendContextCache.delete(key);
+    }
+}, SEND_CONTEXT_PURGE_INTERVAL_MS).unref();
 
 async function getChannelSendContext(userId: string, channelId: string): Promise<SendContext | null> {
     const cacheKey = `${userId}:${channelId}`;
@@ -173,6 +185,24 @@ const emitToChannelMembers = async (io: Server, channelId: string, event: string
         return;
     }
     io.to(channelId).emit(event, payload);
+};
+
+// Saca un socket de la voz en la que esté (si está en alguna): remueve el
+// participante del canal, lo hace salir de la room `voice:<channelId>` y,
+// opcionalmente, notifica a los demás. Extraída a nivel de módulo porque
+// join_voice también necesita expulsar sockets que no son el propio (misma
+// sesión de voz por usuario, ver bloque de reemplazo más abajo).
+const removeSocketFromVoice = async (io: Server, socketId: string, notify = true) => {
+    const channelId = findVoiceChannelOfSocket(socketId);
+    if (!channelId) return;
+
+    removeVoiceParticipant(channelId, socketId);
+    io.in(socketId).socketsLeave(`voice:${channelId}`);
+
+    if (notify) {
+        io.to(`voice:${channelId}`).emit('voice_peer_left', { socketId, channelId });
+        await emitVoiceStateUpdate(io, channelId);
+    }
 };
 
 // Emite el estado actual de un canal de voz a la sala de su comunidad
@@ -427,18 +457,7 @@ export const setupSockets = (io: Server) => {
 
         // ===================== Canales de Voz (señalización WebRTC) =====================
 
-        const leaveVoice = async (notify = true) => {
-            const channelId = findVoiceChannelOfSocket(socket.id);
-            if (!channelId) return;
-
-            removeVoiceParticipant(channelId, socket.id);
-            socket.leave(`voice:${channelId}`);
-
-            if (notify) {
-                io.to(`voice:${channelId}`).emit('voice_peer_left', { socketId: socket.id, channelId });
-                await emitVoiceStateUpdate(io, channelId);
-            }
-        };
+        const leaveVoice = (notify = true) => removeSocketFromVoice(io, socket.id, notify);
 
         socket.on('join_voice', async (
             data: { channelId: string },
@@ -490,6 +509,16 @@ export const setupSockets = (io: Server) => {
                 const communityId = await getCommunityIdOfChannel(channelId);
                 if (communityId) {
                     socket.join(`community:${communityId}`);
+                }
+
+                // Una sola sesión de voz por usuario: si está en voz desde otra
+                // instancia (navegador, otra PC), esa sesión se reemplaza por esta.
+                // Se hace acá, justo antes de leer `existingPeers`, para no dejar
+                // ningún await entre el chequeo y el alta propia (evita una
+                // ventana de carrera con un segundo join casi simultáneo).
+                for (const stale of findVoiceSessionsOfUser(userId, socket.id)) {
+                    await removeSocketFromVoice(io, stale.socketId);
+                    io.to(stale.socketId).emit('voice_session_replaced', { channelId: stale.channelId });
                 }
 
                 const existingPeers = getVoiceParticipants(channelId);

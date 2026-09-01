@@ -39,6 +39,22 @@ export function findVoiceChannelOfSocket(socketId: string): string | null {
     return null;
 }
 
+// Todas las sesiones de voz de un usuario (cualquier canal), excluyendo un socket.
+export function findVoiceSessionsOfUser(
+    userId: string,
+    excludeSocketId: string
+): Array<{ socketId: string; channelId: string }> {
+    const sessions: Array<{ socketId: string; channelId: string }> = [];
+    for (const [channelId, participants] of voiceChannels) {
+        for (const p of participants.values()) {
+            if (p.userId === userId && p.socketId !== excludeSocketId) {
+                sessions.push({ socketId: p.socketId, channelId });
+            }
+        }
+    }
+    return sessions;
+}
+
 export function setParticipantMuted(channelId: string, socketId: string, muted: boolean) {
     const participant = voiceChannels.get(channelId)?.get(socketId);
     if (participant) participant.muted = muted;
