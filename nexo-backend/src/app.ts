@@ -13,8 +13,14 @@ import friendRoutes from './routes/friend.routes';
 import updateRoutes from './routes/updates.routes';
 import attachmentRoutes from './routes/attachment.routes';
 import { corsOrigins } from './config/cors';
+import { authLimiter, inviteLimiter } from './config/rateLimit';
+import { notFoundHandler, errorHandler } from './middlewares/errorHandler';
 
 const app: Application = express();
+
+// Railway (and most PaaS) sit behind a reverse proxy; trust the first hop so
+// req.ip / express-rate-limit see the real client IP from X-Forwarded-For.
+app.set('trust proxy', 1);
 
 // CORS configuration - origins from environment
 const corsOptions: cors.CorsOptions = {
@@ -28,18 +34,21 @@ const corsOptions: cors.CorsOptions = {
 
 app.use(cors(corsOptions));
 app.use(compression());
-app.use(express.json());
+app.use(express.json({ limit: '64kb' }));
 
 // Declaración de Rutas
 app.use('/api/ping', pingRoutes);
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/communities', communityRoutes);
 app.use('/api/channels', channelRoutes);
 app.use('/api/categories', categoryRoutes);
-app.use('/api/invites', inviteRoutes);
+app.use('/api/invites', inviteLimiter, inviteRoutes);
 app.use('/api/friends', friendRoutes);
 app.use('/api/updates', updateRoutes);
 app.use('/api/attachments', attachmentRoutes);
+
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 export default app;

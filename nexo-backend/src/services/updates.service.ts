@@ -1,5 +1,16 @@
+import { badRequest } from '../lib/errors';
+
 const GITHUB_OWNER = 'Ulises-Perez';
 const GITHUB_REPO = 'nexo';
+
+const TAG_PATTERN = /^v?\d+\.\d+\.\d+$/;
+const MANIFEST_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// In-memory cache of the latest release manifest, keyed by "target/arch", so
+// repeated update checks from many clients don't each hit the GitHub API.
+// The cached value is currentVersion-independent; the "is this newer"
+// comparison happens per request against the cached data.
+const manifestCache = new Map<string, { expiresAt: number; manifest: UpdateManifest }>();
 
 interface GitHubAsset {
     name: string;
@@ -51,11 +62,18 @@ function compareVersions(a: string, b: string): number {
 }
 
 export class UpdatesService {
-    public static async getLatestManifest(
+    // Fetches (or serves from the 5-minute cache) the latest release manifest
+    // for a given target/arch, independent of any client's current version.
+    private static async fetchLatestManifestData(
         target: string,
-        arch: string,
-        currentVersion: string
-    ): Promise<UpdateManifest | null> {
+        arch: string
+    ): Promise<UpdateManifest> {
+        const cacheKey = `${target}/${arch}`;
+        const cached = manifestCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.manifest;
+        }
+
         const releaseResponse = await fetch(
             `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
             { headers: githubHeaders() }
@@ -67,10 +85,6 @@ export class UpdatesService {
 
         const release: GitHubRelease = await releaseResponse.json();
         const releaseVersion = release.tag_name.replace(/^v/, '');
-
-        if (compareVersions(releaseVersion, currentVersion) <= 0) {
-            return null;
-        }
 
         const installerAsset = release.assets.find(
             (asset) => /-setup\.exe$/.test(asset.name) && !asset.name.endsWith('.sig')
@@ -101,7 +115,7 @@ export class UpdatesService {
 
         const signature = await signatureResponse.text();
 
-        return {
+        const manifest: UpdateManifest = {
             version: releaseVersion,
             notes: release.body || '',
             pub_date: release.published_at,
@@ -112,11 +126,33 @@ export class UpdatesService {
                 },
             },
         };
+
+        manifestCache.set(cacheKey, { expiresAt: Date.now() + MANIFEST_CACHE_TTL_MS, manifest });
+
+        return manifest;
+    }
+
+    public static async getLatestManifest(
+        target: string,
+        arch: string,
+        currentVersion: string
+    ): Promise<UpdateManifest | null> {
+        const manifest = await this.fetchLatestManifestData(target, arch);
+
+        if (compareVersions(manifest.version, currentVersion) <= 0) {
+            return null;
+        }
+
+        return manifest;
     }
 
     public static async getAssetResponse(tag: string, assetName: string): Promise<Response | null> {
+        if (!TAG_PATTERN.test(tag)) {
+            throw badRequest('Invalid release tag');
+        }
+
         const releaseResponse = await fetch(
-            `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${tag}`,
+            `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${encodeURIComponent(tag)}`,
             { headers: githubHeaders() }
         );
 

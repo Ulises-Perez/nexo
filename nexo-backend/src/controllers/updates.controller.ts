@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Readable } from 'node:stream';
 import { UpdatesService } from '../services/updates.service';
+import { AppError } from '../lib/errors';
 
 export class UpdatesController {
     public static async getManifest(
@@ -47,11 +48,20 @@ export class UpdatesController {
                 return;
             }
 
+            // Strip anything outside a safe filename charset before it reaches
+            // the Content-Disposition header (header/response splitting guard).
+            const safeAssetName = assetName.replace(/[^A-Za-z0-9._-]/g, '_');
+
             res.setHeader('Content-Type', 'application/octet-stream');
-            res.setHeader('Content-Disposition', `attachment; filename="${assetName}"`);
+            res.setHeader('Content-Disposition', `attachment; filename="${safeAssetName}"`);
 
             Readable.fromWeb(assetResponse.body as import('node:stream/web').ReadableStream).pipe(res);
         } catch (error) {
+            if (error instanceof AppError) {
+                res.status(error.status).json({ error: error.message, code: error.code });
+                return;
+            }
+
             console.error('[updates.downloadAsset]', error);
             res.status(500).json({ error: "Internal Server Error" });
         }
