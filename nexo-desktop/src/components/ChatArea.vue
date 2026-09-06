@@ -115,7 +115,7 @@
       </div>
 
       <!-- Message list -->
-      <MessageList v-else :messages="messages" />
+      <MessageList v-else ref="messageListRef" :messages="messages" />
     </main>
 
     <!-- Indicador de "escribiendo..." -->
@@ -166,7 +166,7 @@ import UserAvatar from './UserAvatar.vue';
 import MemberList from './MemberList.vue';
 import DMUserCard from './DMUserCard.vue';
 import { useChatStore } from '../stores/chat';
-import type { DMFriend } from '../stores/chat';
+import type { DMFriend, ChatMessage } from '../stores/chat';
 import { useCommunityStore } from '../stores/community';
 
 interface PendingAttachment {
@@ -182,7 +182,7 @@ interface PendingAttachment {
 const props = defineProps<{
   activeChannelId: string | null;
   activeDMUser: DMFriend | null;
-  messages: any[];
+  messages: ChatMessage[];
   pendingAttachments: PendingAttachment[];
 }>();
 
@@ -208,6 +208,7 @@ const showDMCard = ref(true);
 
 // ===================== Scroll de la timeline de mensajes =====================
 const messagesContainer = ref<HTMLElement | null>(null);
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null);
 const isLoadingOlder = ref(false);
 // ¿El usuario estaba cerca del fondo? Se actualiza en cada scroll y decide si
 // un mensaje nuevo entrante debe auto-desplazar o respetar la lectura de historial.
@@ -249,56 +250,98 @@ watch(
   }
 );
 
-const handleScroll = async () => {
+// Mensaje ancla: el primero actualmente visible en el viewport, identificado
+// por su id de DOM. Anclar por elemento (en vez de por diferencia de altura
+// total) sigue siendo correcto aunque el store recorte mensajes recientes
+// del otro extremo del array (tope MAX_MESSAGES_IN_MEMORY en chat.ts) — ese
+// recorte nunca toca los mensajes viejos cercanos al ancla, ni el destape de
+// filas ya cargadas via revealMore().
+interface ScrollAnchor {
+  prevHeight: number;
+  anchorId: string | undefined;
+  anchorOffset: number | null;
+}
+
+const captureScrollAnchor = (el: HTMLElement): ScrollAnchor => {
+  const containerRectBefore = el.getBoundingClientRect();
+  const anchorEl = Array.from(el.querySelectorAll<HTMLElement>('[data-msg-id]')).find(
+    candidate => candidate.getBoundingClientRect().bottom > containerRectBefore.top
+  );
+  return {
+    prevHeight: el.scrollHeight,
+    anchorId: anchorEl?.dataset.msgId,
+    anchorOffset: anchorEl ? anchorEl.getBoundingClientRect().top - containerRectBefore.top : null,
+  };
+};
+
+const restoreScrollAnchor = (el: HTMLElement, anchor: ScrollAnchor) => {
+  const newAnchorEl = anchor.anchorId
+    ? el.querySelector<HTMLElement>(`[data-msg-id="${anchor.anchorId}"]`)
+    : null;
+  if (newAnchorEl && anchor.anchorOffset !== null) {
+    // Restaurar el mismo mensaje a la misma posición relativa al viewport.
+    const containerRectAfter = el.getBoundingClientRect();
+    const newAnchorOffset = newAnchorEl.getBoundingClientRect().top - containerRectAfter.top;
+    el.scrollTop += newAnchorOffset - anchor.anchorOffset;
+  } else {
+    // Fallback: sin ancla identificable, usar la diferencia de altura total.
+    el.scrollTop = el.scrollHeight - anchor.prevHeight;
+  }
+};
+
+const handleScrollTop = async (el: HTMLElement) => {
+  isLoadingOlder.value = true;
+  const anchor = captureScrollAnchor(el);
+  // Canal al que pertenece esta carga: si el usuario cambia de canal mientras
+  // está en vuelo, no aplicamos la restauración de scroll al canal nuevo.
+  const loadingChannelId = activeId.value;
+  try {
+    const prepended = await chatStore.loadOlderMessages(loadingChannelId);
+    if (prepended > 0 && activeId.value === loadingChannelId) {
+      await nextTick();
+      restoreScrollAnchor(el, anchor);
+    }
+  } finally {
+    isLoadingOlder.value = false;
+  }
+};
+
+// Un frame de scroll: primero destapa filas ya cargadas por MessageList
+// (renderLimit windowing) sin tocar el store, y solo pide más historial al
+// backend cuando ya no quedan filas ocultas por revelar.
+const processScrollFrame = async () => {
   const el = messagesContainer.value;
   if (!el) return;
 
   // Recordar si el usuario está cerca del fondo (para mensajes entrantes).
   wasAtBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_THRESHOLD;
 
-  // Carga perezosa de mensajes más antiguos al llegar arriba.
-  if (
-    el.scrollTop <= SCROLL_TOP_THRESHOLD &&
-    !isLoadingOlder.value &&
-    chatStore.getHasMoreOlder(activeId.value)
-  ) {
-    isLoadingOlder.value = true;
-    const prevHeight = el.scrollHeight;
-    // Mensaje ancla: el primero actualmente visible en el viewport, identificado
-    // por su id de DOM. Anclar por elemento (en vez de por diferencia de altura
-    // total) sigue siendo correcto aunque el store recorte mensajes recientes
-    // del otro extremo del array (tope MAX_MESSAGES_IN_MEMORY en chat.ts) — ese
-    // recorte nunca toca los mensajes viejos cercanos al ancla.
-    const containerRectBefore = el.getBoundingClientRect();
-    const anchorEl = Array.from(el.querySelectorAll<HTMLElement>('[data-msg-id]')).find(
-      candidate => candidate.getBoundingClientRect().bottom > containerRectBefore.top
-    );
-    const anchorId = anchorEl?.dataset.msgId;
-    const anchorOffset = anchorEl ? anchorEl.getBoundingClientRect().top - containerRectBefore.top : null;
-    // Canal al que pertenece esta carga: si el usuario cambia de canal mientras
-    // está en vuelo, no aplicamos la restauración de scroll al canal nuevo.
-    const loadingChannelId = activeId.value;
-    try {
-      const prepended = await chatStore.loadOlderMessages(loadingChannelId);
-      if (prepended > 0 && activeId.value === loadingChannelId) {
-        await nextTick();
-        const newAnchorEl = anchorId
-          ? el.querySelector<HTMLElement>(`[data-msg-id="${anchorId}"]`)
-          : null;
-        if (newAnchorEl && anchorOffset !== null) {
-          // Restaurar el mismo mensaje a la misma posición relativa al viewport.
-          const containerRectAfter = el.getBoundingClientRect();
-          const newAnchorOffset = newAnchorEl.getBoundingClientRect().top - containerRectAfter.top;
-          el.scrollTop += newAnchorOffset - anchorOffset;
-        } else {
-          // Fallback: sin ancla identificable, usar la diferencia de altura total.
-          el.scrollTop = el.scrollHeight - prevHeight;
-        }
-      }
-    } finally {
-      isLoadingOlder.value = false;
-    }
+  if (el.scrollTop > SCROLL_TOP_THRESHOLD || isLoadingOlder.value) return;
+
+  const list = messageListRef.value;
+  if (list?.hasHiddenRows) {
+    const anchor = captureScrollAnchor(el);
+    list.revealMore();
+    await nextTick();
+    restoreScrollAnchor(el, anchor);
+    return;
   }
+
+  if (chatStore.getHasMoreOlder(activeId.value)) {
+    await handleScrollTop(el);
+  }
+};
+
+// rAF-throttled: coalesce bursts of native scroll events into one measurement
+// (and one potential revealMore/loadOlderMessages call) per animation frame.
+let scrollFrameQueued = false;
+const handleScroll = () => {
+  if (scrollFrameQueued) return;
+  scrollFrameQueued = true;
+  requestAnimationFrame(() => {
+    scrollFrameQueued = false;
+    processScrollFrame();
+  });
 };
 
 // Mensaje nuevo entrante en el canal activo: solo auto-desplazar si el usuario

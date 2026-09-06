@@ -171,7 +171,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { useChatStore } from '../stores/chat';
@@ -195,6 +195,8 @@ import ScreenShareQualityModal from '../components/ScreenShareQualityModal.vue';
 import ScreenShareViewer from '../components/ScreenShareViewer.vue';
 import ScreenShareSelfPreview from '../components/ScreenShareSelfPreview.vue';
 import { useUserSettingsStore } from '../stores/userSettings';
+import { dialog } from '../composables/useDialog';
+import { toast } from '../composables/useToast';
 
 const authStore = useAuthStore();
 const chatStore = useChatStore();
@@ -336,36 +338,40 @@ const generateAndCopyInvite = async (communityId: string) => {
   if (code) {
     try {
       await navigator.clipboard.writeText(code);
-      alert('¡Código de invitación copiado al portapapeles!\n\n' + code + '\n\nCompartilo con quien quieras invitar: lo pega en "Añadir un servidor" → "Unirse".');
+      toast.success('Código de invitación copiado al portapapeles: ' + code);
     } catch (err) {
       console.error('Error al copiar al portapapeles:', err);
-      prompt('Presiona Ctrl+C para copiar tu código de invitación:', code);
+      await dialog.prompt({ message: 'Copia tu código de invitación:', defaultValue: code });
     }
   } else {
-    alert('Hubo un error al generar la invitación.');
+    toast.error('Hubo un error al generar la invitación.');
   }
 };
 
 const handleLeaveCommunity = async (communityId: string, communityName: string) => {
   activeDropdownId.value = null;
-  if (confirm(`¿Estás seguro de que deseas salir de la comunidad "${communityName}"? Perderás acceso a todos sus canales.`)) {
-    const wasActive = communityStore.activeCommunityId === communityId;
-    const success = await communityStore.leaveCommunity(communityId);
-    if (success) {
-      if (wasActive) {
-        chatStore.leaveChannel();
-        communityStore.setActiveChannel('');
-      }
-    } else {
-      alert('Hubo un error al intentar salir de la comunidad.');
+  const confirmed = await dialog.confirm({
+    message: `¿Estás seguro de que deseas salir de la comunidad "${communityName}"? Perderás acceso a todos sus canales.`,
+    danger: true,
+  });
+  if (!confirmed) return;
+  const wasActive = communityStore.activeCommunityId === communityId;
+  const success = await communityStore.leaveCommunity(communityId);
+  if (success) {
+    if (wasActive) {
+      chatStore.leaveChannel();
+      communityStore.setActiveChannel('');
     }
+  } else {
+    toast.error('Hubo un error al intentar salir de la comunidad.');
   }
 };
 
 const handleSendMessage = (content: string, attachments: any[]) => {
   if (chatStore.activeChannelId || chatStore.activeDMUser) {
     chatStore.sendMessage(content, attachments);
-    scrollToBottom();
+    // Scroll-to-bottom on send is ChatArea's responsibility (it watches the
+    // last message id and auto-scrolls when the user is near the bottom).
   }
 };
 
@@ -378,16 +384,6 @@ const closeDropdown = (e: MouseEvent) => {
   if (!target.closest('.user-floating-panel') && !target.closest('.nav-squircle')) {
     showUserPanel.value = false;
   }
-};
-
-// Auto-scroll
-const scrollToBottom = () => {
-  nextTick(() => {
-    const container = document.getElementById('messages-container');
-    if (container) {
-      container.scrollTop = container.scrollHeight;
-    }
-  });
 };
 
 onMounted(async () => {

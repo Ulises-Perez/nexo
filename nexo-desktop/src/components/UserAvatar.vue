@@ -5,7 +5,7 @@
       :class="[sizeClass]"
       :style="avatarStyle"
     >
-      <img v-if="avatarUrl" :src="avatarUrl" :alt="username" class="w-full h-full object-cover">
+      <img v-if="avatarUrl" :src="avatarUrl" :alt="username" class="w-full h-full object-cover" loading="lazy" decoding="async">
       <span v-else class="avatar-letter" :class="letterSizeClass">{{ displayLetter }}</span>
     </div>
     <div
