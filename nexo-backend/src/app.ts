@@ -11,11 +11,12 @@ import categoryRoutes from './routes/category.routes';
 import inviteRoutes from './routes/invite.routes';
 import friendRoutes from './routes/friend.routes';
 import updateRoutes from './routes/updates.routes';
+import attachmentRoutes from './routes/attachment.routes';
+import { corsOrigins } from './config/cors';
 
 const app: Application = express();
 
 // CORS configuration - origins from environment
-const corsOrigins = process.env.CORS_ORIGINS?.split(',').map(s => s.trim()) || [];
 const corsOptions: cors.CorsOptions = {
     origin: corsOrigins.length > 0 
         ? corsOrigins 
@@ -39,5 +40,6 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/friends', friendRoutes);
 app.use('/api/updates', updateRoutes);
+app.use('/api/attachments', attachmentRoutes);
 
 export default app;
