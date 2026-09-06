@@ -301,6 +301,9 @@ export const useVoiceStore = defineStore('voice', () => {
         }
         const audio = audioElements.get(remoteSocketId);
         if (audio) {
+            // Pause before detaching: an autoplay element left "playing" with
+            // no source keeps the media pipeline alive until it is collected.
+            audio.pause();
             audio.srcObject = null;
             audioElements.delete(remoteSocketId);
         }
@@ -687,6 +690,12 @@ export const useVoiceStore = defineStore('voice', () => {
         if (socket?.id) unwatchStream(socket.id);
         stopVadLoop();
         speaking.value = {};
+
+        // Nothing left to analyse: park the audio thread until the next call
+        // (ensureAudioCtx resumes a suspended context on demand).
+        if (analysers.size === 0 && audioCtx && audioCtx.state === 'running') {
+            void audioCtx.suspend().catch(() => { /* ignore */ });
+        }
 
         if (localStream) {
             localStream.getTracks().forEach(t => t.stop());

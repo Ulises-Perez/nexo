@@ -72,7 +72,7 @@
           <div v-else>
              <div
                 v-for="(friend, index) in filteredFriends.list"
-                :key="index"
+                :key="friend.id"
                 @click="openDM(friend)"
                 class="flex items-center justify-between py-3 border-t border-white/[0.03] group hover:bg-white/[0.04] hover:rounded-xl px-3 -mx-1 cursor-pointer transition-all duration-200"
                 :class="{'border-t-0': index === 0}"
@@ -192,15 +192,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onUnmounted, watch } from 'vue';
 import { useFriendsStore } from '../stores/friends';
 import { useChatStore } from '../stores/chat';
-import { useAuthStore } from '../stores/auth';
 import UserAvatar from './UserAvatar.vue';
 
 const friendsStore = useFriendsStore();
 const chatStore = useChatStore();
-const authStore = useAuthStore();
 
 const tabs = [
   { id: 'online', label: 'Conectados' },
@@ -214,6 +212,7 @@ const requestSent = ref(false);
 const requestError = ref('');
 
 let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+let requestSentTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // Watch for shouldShowFriends to change tab when closing DM from sidebar
 watch(() => chatStore.shouldShowFriends, (shouldShow) => {
@@ -248,8 +247,10 @@ const sendRequest = async (userId: string) => {
         requestSent.value = true;
         searchQuery.value = '';
         friendsStore.clearSearch();
-        setTimeout(() => {
+        if (requestSentTimeout) clearTimeout(requestSentTimeout);
+        requestSentTimeout = setTimeout(() => {
             requestSent.value = false;
+            requestSentTimeout = null;
         }, 4000);
     } else {
         requestError.value = result.error || 'Error al enviar solicitud';
@@ -270,13 +271,12 @@ const openDM = (friend: any) => {
     chatStore.openDM(friend);
 };
 
-onMounted(async () => {
-    // Don't fetch if user is not authenticated (e.g., during logout)
-    if (!authStore.token) return;
+// Friends and pending requests are loaded once by HomeSidebar (mounted for
+// the whole home/DM view, i.e. longer than this component) through
+// friendsStore.ensureLoaded(); no second fetch here.
 
-    await Promise.all([
-        friendsStore.fetchFriends(),
-        friendsStore.fetchPendingRequests(),
-    ]);
+onUnmounted(() => {
+    if (searchTimeout) clearTimeout(searchTimeout);
+    if (requestSentTimeout) clearTimeout(requestSentTimeout);
 });
 </script>

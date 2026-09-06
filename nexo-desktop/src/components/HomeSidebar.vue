@@ -136,10 +136,8 @@ onMounted(async () => {
     // Don't fetch if user is not authenticated (e.g., during logout)
     if (!authStore.token) return;
 
-    await Promise.all([
-        friendsStore.fetchFriends(),
-        friendsStore.fetchPendingRequests(),
-    ]);
+    // Single loader for friends + pending requests (deduped in the store).
+    await friendsStore.ensureLoaded();
 });
 </script>
 

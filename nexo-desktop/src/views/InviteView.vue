@@ -132,7 +132,9 @@ const joinCommunity = async () => {
 
     if (response.status === 200) {
         if (response.data.communityId) {
-            communityStore.setActiveCommunity(response.data.communityId);
+            // Dashboard.onMounted resets the active community before loading
+            // the list, so hand it over as a pending selection instead.
+            communityStore.pendingCommunityId = response.data.communityId;
         }
         router.push('/dashboard');
     } else {

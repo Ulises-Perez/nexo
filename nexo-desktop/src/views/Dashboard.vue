@@ -427,6 +427,16 @@ onMounted(async () => {
     communityStore.fetchCommunities(),
     chatStore.fetchDMConversations(),
   ]);
+
+  // A community joined via invite right before navigating here: activate it
+  // now that the list is loaded (the reset above cleared any early selection).
+  const pendingId = communityStore.pendingCommunityId;
+  if (pendingId) {
+    communityStore.pendingCommunityId = '';
+    if (communityStore.communities.some(c => c.id === pendingId)) {
+      await selectCommunity(pendingId);
+    }
+  }
 });
 
 onUnmounted(() => {
