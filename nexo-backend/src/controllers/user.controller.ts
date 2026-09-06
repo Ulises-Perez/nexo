@@ -268,14 +268,15 @@ export class UserController {
                     })
                 ]);
 
-                io.to(`user:${userId}`).emit('user_updated', payload);
-                memberships.forEach(m => {
-                    io.to(`community:${m.communityId}`).emit('user_updated', payload);
-                });
+                // One multi-room emit instead of a loop of emits: with the Redis
+                // adapter every io.to() is a publish, so batching matters.
+                const rooms = new Set<string>([`user:${userId}`]);
+                memberships.forEach(m => rooms.add(`community:${m.communityId}`));
                 friendships.forEach(f => {
                     const friendId = f.userAId === userId ? f.userBId : f.userAId;
-                    io.to(`user:${friendId}`).emit('user_updated', payload);
+                    rooms.add(`user:${friendId}`);
                 });
+                io.to(Array.from(rooms)).emit('user_updated', payload);
             }
 
             res.status(200).json(user);

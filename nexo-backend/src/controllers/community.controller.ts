@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { prisma } from '../db/prisma';
 import { Permissions, ALL_PERMISSIONS, getMemberContext, hasPermission } from '../lib/permissions';
-import { emitCommunityUpdated, emitMemberJoined, getIO, MemberJoinedPayload } from '../sockets/io';
+import { emitCommunityUpdated, emitMemberJoined, emitJoinCommunityRoom, getIO, MemberJoinedPayload } from '../sockets/io';
 
 export class CommunityController {
     public static async getUserCommunities(req: Request, res: Response): Promise<void> {
@@ -184,6 +184,7 @@ export class CommunityController {
                 }
             });
 
+            emitJoinCommunityRoom(userId, newCommunity.id);
             res.status(201).json(newCommunity);
         } catch (error) {
             console.error('[CommunityController - createCommunity Error]', error);
@@ -302,6 +303,7 @@ export class CommunityController {
                 roles: [],
                 isOwner: false
             };
+            emitJoinCommunityRoom(userId, community.id);
             emitMemberJoined(community.id, memberPayload);
 
             res.status(200).json({ success: true, communityId: community.id });

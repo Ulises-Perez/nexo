@@ -1,13 +1,15 @@
 import { Server } from 'socket.io';
 import { socketAuth, AuthenticatedSocket } from '../middlewares/socketAuth';
 import { prisma } from '../db/prisma';
-import { Permissions, getMemberContext, hasPermission, getCommunityIdOfChannel } from '../lib/permissions';
+import { Permissions, getMemberContext, hasPermission, getCommunityIdOfChannel, isUserMemberOfChannel } from '../lib/permissions';
+import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_MESSAGE_LENGTH, validateAttachmentInput, type AttachmentInput } from '../lib/attachments';
 import {
     addVoiceParticipant,
     removeVoiceParticipant,
     getVoiceParticipants,
     findVoiceChannelOfSocket,
     findVoiceSessionsOfUser,
+    getCommunityIdOfVoiceChannel,
     setParticipantMuted,
     setParticipantSharing,
     getVoiceStates,
@@ -15,44 +17,12 @@ import {
 
 const userSockets = new Map<string, Set<string>>();
 
-// Verificar si el usuario es miembro de la comunidad del canal
-async function isUserMemberOfChannel(userId: string, channelId: string): Promise<boolean> {
-    // Nota: ya no atrapa errores de DB acá (ver decisión D2) — un error
-    // transitorio (p. ej. Postgres reiniciando) debe propagarse como excepción
-    // en vez de confundirse con un "false" honesto de acceso denegado. Los dos
-    // callers (join_channel, join_voice) ya están dentro de su propio try/catch.
-    const channel = await prisma.channel.findUnique({
-        where: { id: channelId },
-        include: {
-            category: {
-                include: {
-                    community: {
-                        include: {
-                            members: {
-                                where: { userId }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    if (!channel) return false;
-
-    // Es un canal DM: solo los dos participantes de la conversación pueden acceder
-    if (channel.type === 'dm') {
-        const conversation = await prisma.conversation.findUnique({
-            where: { channelId },
-            select: { userAId: true, userBId: true }
-        });
-        if (!conversation) return false;
-        return conversation.userAId === userId || conversation.userBId === userId;
-    }
-
-    // Verificar si es miembro de la comunidad
-    return channel.category?.community?.members?.some(m => m.userId === userId) ?? false;
-}
+// Offline announcements are debounced: a user whose last socket drops gets a
+// short grace window to come back (app restart, network blip, backend
+// redeploy). If they reconnect in time, contacts never see an offline/online
+// flap and the database is not written twice.
+const OFFLINE_GRACE_MS = 8000;
+const pendingOffline = new Map<string, NodeJS.Timeout>();
 
 // Access-check + delivery target for send_message, collapsed into a single
 // query (vs. isUserMemberOfChannel's separate conversation lookup for DMs).
@@ -79,6 +49,15 @@ setInterval(() => {
         if (entry.expiresAt <= now) sendContextCache.delete(key);
     }
 }, SEND_CONTEXT_PURGE_INTERVAL_MS).unref();
+
+// Drops every cached send context of a user (keys are `${userId}:${channelId}`)
+// so a kicked/banned member cannot keep sending for the remaining TTL.
+export function invalidateSendContext(userId: string): void {
+    const prefix = `${userId}:`;
+    for (const key of sendContextCache.keys()) {
+        if (key.startsWith(prefix)) sendContextCache.delete(key);
+    }
+}
 
 async function getChannelSendContext(userId: string, channelId: string): Promise<SendContext | null> {
     const cacheKey = `${userId}:${channelId}`;
@@ -144,21 +123,32 @@ const getDMPartnersOfUser = async (userId: string): Promise<string[]> => {
     return conversations.map(c => c.userAId === userId ? c.userBId : c.userAId);
 };
 
-// Notifica el cambio de estado (online/offline) a amigos y a partners de DM.
-// Los partners de DM se deduplican contra los amigos ya notificados para no
-// emitir el evento dos veces al mismo usuario.
+// Notifies friends and DM partners of a status change (online/offline) with a
+// single multi-room emit; the room list is de-duplicated so nobody gets the
+// event twice.
 const emitStatusToFriends = async (io: Server, userId: string, status: string) => {
     const [friendIds, dmPartnerIds] = await Promise.all([
         getFriendsOfUser(userId),
         getDMPartnersOfUser(userId),
     ]);
 
-    const notified = new Set<string>();
-    [...friendIds, ...dmPartnerIds].forEach(contactId => {
-        if (notified.has(contactId)) return;
-        notified.add(contactId);
-        io.to(`user:${contactId}`).emit('friend_status', { userId, status });
-    });
+    const rooms = Array.from(new Set([...friendIds, ...dmPartnerIds]), id => `user:${id}`);
+    if (rooms.length === 0) return;
+    io.to(rooms).emit('friend_status', { userId, status });
+};
+
+// Runs when the offline grace window elapses without a reconnection.
+const announceOffline = async (io: Server, userId: string) => {
+    pendingOffline.delete(userId);
+    // A socket may have connected while the timer was firing.
+    if (userSockets.has(userId)) return;
+    try {
+        await updateUserStatus(userId, 'offline');
+        await emitStatusToFriends(io, userId, 'offline');
+        console.log(`[Socket.io] User ${userId} está offline`);
+    } catch (error) {
+        console.error('[Socket.io] Error notificando offline:', error);
+    }
 };
 
 const getCommunityIdsOfUser = async (userId: string): Promise<string[]> => {
@@ -180,47 +170,43 @@ const emitToChannelMembers = async (io: Server, channelId: string, event: string
         select: { userAId: true, userBId: true },
     });
     if (conversation) {
-        io.to(`user:${conversation.userAId}`).emit(event, payload);
-        io.to(`user:${conversation.userBId}`).emit(event, payload);
+        io.to([`user:${conversation.userAId}`, `user:${conversation.userBId}`]).emit(event, payload);
         return;
     }
     io.to(channelId).emit(event, payload);
 };
 
-// Saca un socket de la voz en la que esté (si está en alguna): remueve el
-// participante del canal, lo hace salir de la room `voice:<channelId>` y,
-// opcionalmente, notifica a los demás. Extraída a nivel de módulo porque
-// join_voice también necesita expulsar sockets que no son el propio (misma
-// sesión de voz por usuario, ver bloque de reemplazo más abajo).
-const removeSocketFromVoice = async (io: Server, socketId: string, notify = true) => {
+// Removes a socket from whatever voice channel it is in: drops the
+// participant, leaves the `voice:<channelId>` room and optionally notifies the
+// rest. Module-level (and exported) because join_voice evicts other sockets
+// of the same user, and io.ts evicts kicked/banned members.
+export const removeSocketFromVoice = async (io: Server, socketId: string, notify = true) => {
     const channelId = findVoiceChannelOfSocket(socketId);
     if (!channelId) return;
 
+    // Resolve the community before removal: once the last participant leaves
+    // the channel entry is gone and the stored communityId with it.
+    const communityId = getCommunityIdOfVoiceChannel(channelId);
     removeVoiceParticipant(channelId, socketId);
     io.in(socketId).socketsLeave(`voice:${channelId}`);
 
     if (notify) {
         io.to(`voice:${channelId}`).emit('voice_peer_left', { socketId, channelId });
-        await emitVoiceStateUpdate(io, channelId);
+        emitVoiceStateUpdate(io, channelId, communityId);
     }
 };
 
-// Emite el estado actual de un canal de voz a la sala de su comunidad
-const emitVoiceStateUpdate = async (io: Server, channelId: string) => {
-    try {
-        const communityId = await getCommunityIdOfChannel(channelId);
-        if (!communityId) return;
-        io.to(`community:${communityId}`).emit('voice_state_update', {
-            channelId,
-            participants: getVoiceParticipants(channelId),
-        });
-    } catch (error) {
-        // Varios call sites (leave_voice, disconnect, voice_mute, screen share)
-        // no envuelven esta función en su propio try/catch: un error transitorio
-        // de la base acá (p. ej. Postgres reiniciando) no debe tirar todo el
-        // proceso y desconectar a todos los que están en una llamada de voz.
-        console.error('[Socket.io] Error en emitVoiceStateUpdate:', error);
-    }
+// Broadcasts the current roster of a voice channel to its community room.
+// The community id is stored on each participant at join time, so this never
+// touches the database; callers that already know it pass it explicitly
+// (needed right after the last participant left).
+const emitVoiceStateUpdate = (io: Server, channelId: string, communityId?: string | null) => {
+    const target = communityId ?? getCommunityIdOfVoiceChannel(channelId);
+    if (!target) return;
+    io.to(`community:${target}`).emit('voice_state_update', {
+        channelId,
+        participants: getVoiceParticipants(channelId),
+    });
 };
 
 export const setupSockets = (io: Server) => {
@@ -231,6 +217,26 @@ export const setupSockets = (io: Server) => {
         const userId = authSocket.data.userId;
 
         console.log(`[Socket.io] Usuario Conectado. Socket ID: ${socket.id} - User ID: ${userId}`);
+
+        // Every handler goes through this wrapper so an async rejection is
+        // logged instead of becoming an unhandledRejection that kills the
+        // process (see crashShutdown in server.ts).
+        const on = <T extends unknown[]>(event: string, handler: (...args: T) => void | Promise<void>) =>
+            socket.on(event, (...args: T) => {
+                Promise.resolve()
+                    .then(() => handler(...args))
+                    .catch(err => console.error(`[Socket.io] ${event} handler error:`, err));
+            });
+
+        // Coming back inside the offline grace window: cancel the pending
+        // announcement and skip the online write/broadcast, since from the
+        // contacts' point of view this user never left.
+        const pendingTimer = pendingOffline.get(userId);
+        const wasStillOnline = pendingTimer !== undefined;
+        if (pendingTimer) {
+            clearTimeout(pendingTimer);
+            pendingOffline.delete(userId);
+        }
 
         if (!userSockets.has(userId)) {
             userSockets.set(userId, new Set());
@@ -248,7 +254,7 @@ export const setupSockets = (io: Server) => {
         let me: { username: string; avatarUrl: string | null } | null = null;
 
         try {
-            if (userSockets.get(userId)!.size === 1) {
+            if (userSockets.get(userId)!.size === 1 && !wasStillOnline) {
                 await updateUserStatus(userId, 'online');
                 await emitStatusToFriends(io, userId, 'online');
                 console.log(`[Socket.io] User ${userId} está online`);
@@ -277,7 +283,7 @@ export const setupSockets = (io: Server) => {
         }
 
         // El cliente lo emite tras crear o unirse a una comunidad
-        socket.on('join_community_room', async (communityId: string) => {
+        on('join_community_room', async (communityId: string) => {
             try {
                 const ctx = await getMemberContext(userId, communityId);
                 if (!ctx) return;
@@ -287,7 +293,7 @@ export const setupSockets = (io: Server) => {
             }
         });
 
-        socket.on('join_channel', async (channelId: string) => {
+        on('join_channel', async (channelId: string) => {
             try {
                 // Verificar que el usuario tiene acceso al canal
                 const hasAccess = await isUserMemberOfChannel(userId, channelId);
@@ -302,30 +308,63 @@ export const setupSockets = (io: Server) => {
             }
         });
 
-        socket.on('leave_channel', (channelId: string) => {
+        on('leave_channel', (channelId: string) => {
             socket.leave(channelId);
             console.log(`[Socket.io] User ${userId} abandonó el canal: ${channelId}`);
         });
 
-        socket.on('send_message', async (
-            data: { channelId: string; content: string; attachments?: Array<{ objectKey: string; cdnUrl: string; name: string; size: number; mimeType: string; type: string }>; clientNonce?: string },
-            ack?: (res: { ok: boolean; messageId?: string }) => void
+        on('send_message', async (
+            data: { channelId: string; content: string; attachments?: unknown[]; clientNonce?: string },
+            ack?: (res: { ok: boolean; messageId?: string; error?: string }) => void
         ) => {
             // Older clients don't pass an ack callback; guard against double-ack
             // between the success path and the catch block below.
             let acked = false;
-            const respond = (res: { ok: boolean; messageId?: string }) => {
+            const respond = (res: { ok: boolean; messageId?: string; error?: string }) => {
                 if (acked) return;
                 acked = true;
                 ack?.(res);
             };
 
             try {
-                const { channelId, content, attachments } = data;
+                const channelId = data?.channelId;
+                const content = data?.content ?? '';
+                const rawAttachments = data?.attachments;
 
-                if (!channelId || (!content && (!attachments || attachments.length === 0))) {
+                if (typeof channelId !== 'string' || !channelId) {
+                    respond({ ok: false, error: 'channelId is required' });
+                    return;
+                }
+                if (typeof content !== 'string') {
+                    respond({ ok: false, error: 'content must be a string' });
+                    return;
+                }
+                if (content.length > MAX_MESSAGE_LENGTH) {
+                    respond({ ok: false, error: `content exceeds ${MAX_MESSAGE_LENGTH} characters` });
+                    return;
+                }
+                if (rawAttachments !== undefined && !Array.isArray(rawAttachments)) {
+                    respond({ ok: false, error: 'attachments must be an array' });
+                    return;
+                }
+                if (rawAttachments && rawAttachments.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+                    respond({ ok: false, error: `at most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message` });
+                    return;
+                }
+
+                const attachments: AttachmentInput[] = [];
+                for (const raw of rawAttachments ?? []) {
+                    const result = validateAttachmentInput(raw);
+                    if (!result.ok) {
+                        respond({ ok: false, error: result.error });
+                        return;
+                    }
+                    attachments.push(result.value);
+                }
+
+                if (content.trim() === '' && attachments.length === 0) {
                     console.log(`[Socket.io] send_message cancelado: datos vacíos`);
-                    respond({ ok: false });
+                    respond({ ok: false, error: 'message is empty' });
                     return;
                 }
 
@@ -339,15 +378,15 @@ export const setupSockets = (io: Server) => {
 
                 const newMessage = await prisma.message.create({
                     data: {
-                        content: content || '',
+                        content,
                         channelId,
                         userId,
-                        attachments: attachments && attachments.length > 0 ? {
+                        attachments: attachments.length > 0 ? {
                             create: attachments.map(att => ({
                                 name: att.name,
                                 size: att.size,
                                 mimeType: att.mimeType,
-                                url: att.cdnUrl,
+                                url: att.url,
                                 type: att.type
                             }))
                         } : undefined
@@ -397,7 +436,7 @@ export const setupSockets = (io: Server) => {
         });
 
         // Editar un mensaje propio
-        socket.on('edit_message', async (data: { messageId: string; content: string }) => {
+        on('edit_message', async (data: { messageId: string; content: string }) => {
             try {
                 const { messageId, content } = data;
                 if (!messageId || !content || content.trim() === '') return;
@@ -423,7 +462,7 @@ export const setupSockets = (io: Server) => {
         });
 
         // Eliminar un mensaje (autor, o moderador con MANAGE_MESSAGES en la comunidad)
-        socket.on('delete_message', async (data: { messageId: string }) => {
+        on('delete_message', async (data: { messageId: string }) => {
             try {
                 const { messageId } = data;
                 if (!messageId) return;
@@ -446,8 +485,10 @@ export const setupSockets = (io: Server) => {
         });
 
         // Indicador de "escribiendo..."
-        socket.on('typing', (data: { channelId: string }) => {
-            if (!data?.channelId) return;
+        on('typing', (data: { channelId: string }) => {
+            if (typeof data?.channelId !== 'string' || !data.channelId) return;
+            // Only sockets that actually joined the channel room may signal typing in it.
+            if (!socket.rooms.has(data.channelId)) return;
             socket.to(data.channelId).emit('user_typing', {
                 channelId: data.channelId,
                 userId,
@@ -459,7 +500,7 @@ export const setupSockets = (io: Server) => {
 
         const leaveVoice = (notify = true) => removeSocketFromVoice(io, socket.id, notify);
 
-        socket.on('join_voice', async (
+        on('join_voice', async (
             data: { channelId: string },
             ack?: (res: { ok: boolean; code?: 'not_found' | 'forbidden' | 'error'; retryable?: boolean }) => void
         ) => {
@@ -531,6 +572,8 @@ export const setupSockets = (io: Server) => {
                     muted: false,
                     sharing: false,
                     shareId: null,
+                    // Stored so roster broadcasts never query the DB per event.
+                    communityId,
                 };
                 addVoiceParticipant(channelId, newParticipant);
 
@@ -549,14 +592,14 @@ export const setupSockets = (io: Server) => {
                 // para que una falla en emitVoiceStateUpdate no envenene el ack.
                 respond({ ok: true });
 
-                await emitVoiceStateUpdate(io, channelId);
+                emitVoiceStateUpdate(io, channelId);
             } catch (error) {
                 console.error('[Socket.io] Error en join_voice:', error);
                 respond({ ok: false, code: 'error', retryable: true });
             }
         });
 
-        socket.on('leave_voice', async () => {
+        on('leave_voice', async () => {
             try {
                 await leaveVoice();
             } catch (error) {
@@ -565,8 +608,12 @@ export const setupSockets = (io: Server) => {
         });
 
         // Relay de señalización WebRTC (ofertas, respuestas y candidatos ICE)
-        socket.on('voice_signal', (data: { to: string; signal: any }) => {
-            if (!data?.to || !data?.signal) return;
+        on('voice_signal', (data: { to: string; signal: any }) => {
+            if (typeof data?.to !== 'string' || !data.to || !data?.signal) return;
+            // Only relay signaling between two sockets that share the same voice channel.
+            const ownChannel = findVoiceChannelOfSocket(socket.id);
+            const targetChannel = findVoiceChannelOfSocket(data.to);
+            if (!ownChannel || !targetChannel || ownChannel !== targetChannel) return;
             io.to(data.to).emit('voice_signal', {
                 from: socket.id,
                 userId,
@@ -574,29 +621,29 @@ export const setupSockets = (io: Server) => {
             });
         });
 
-        socket.on('voice_mute', async (data: { muted: boolean }) => {
+        on('voice_mute', async (data: { muted: boolean }) => {
             const channelId = findVoiceChannelOfSocket(socket.id);
             if (!channelId) return;
             setParticipantMuted(channelId, socket.id, !!data?.muted);
-            await emitVoiceStateUpdate(io, channelId);
+            emitVoiceStateUpdate(io, channelId);
         });
 
-        socket.on('start_screen_share', async (data: { shareId: string }) => {
+        on('start_screen_share', async (data: { shareId: string }) => {
             const channelId = findVoiceChannelOfSocket(socket.id);
             if (!channelId || typeof data?.shareId !== 'string') return;
             setParticipantSharing(channelId, socket.id, true, data.shareId);
-            await emitVoiceStateUpdate(io, channelId);
+            emitVoiceStateUpdate(io, channelId);
         });
 
-        socket.on('stop_screen_share', async () => {
+        on('stop_screen_share', async () => {
             const channelId = findVoiceChannelOfSocket(socket.id);
             if (!channelId) return;
             setParticipantSharing(channelId, socket.id, false, null);
-            await emitVoiceStateUpdate(io, channelId);
+            emitVoiceStateUpdate(io, channelId);
         });
 
         // El cliente pide el estado de voz de los canales de una comunidad
-        socket.on('get_voice_states', (data: { channelIds: string[] }, callback?: (states: any) => void) => {
+        on('get_voice_states', (data: { channelIds: string[] }, callback?: (states: any) => void) => {
             if (!Array.isArray(data?.channelIds)) return;
             const states = getVoiceStates(data.channelIds);
             if (typeof callback === 'function') {
@@ -606,7 +653,7 @@ export const setupSockets = (io: Server) => {
             }
         });
 
-        socket.on('disconnect', async () => {
+        on('disconnect', async () => {
             console.log(`[Socket.io] Usuario Desconectado. Socket ID: ${socket.id} - User ID: ${userId}`);
 
             // Tres fallas aisladas a propósito, no un único try/catch: este es
@@ -630,14 +677,13 @@ export const setupSockets = (io: Server) => {
             }
 
             if (isLastSocket) {
-                try {
-                    await updateUserStatus(userId, 'offline');
-                    await emitStatusToFriends(io, userId, 'offline');
-                    socket.to(`user:${userId}`).emit('my_status', { status: 'offline' });
-                    console.log(`[Socket.io] User ${userId} está offline`);
-                } catch (error) {
-                    console.error('[Socket.io] Error notificando offline en disconnect:', error);
-                }
+                // Debounced: the DB write and the broadcast happen only if the
+                // user does not come back within OFFLINE_GRACE_MS.
+                const existing = pendingOffline.get(userId);
+                if (existing) clearTimeout(existing);
+                const timer = setTimeout(() => { void announceOffline(io, userId); }, OFFLINE_GRACE_MS);
+                timer.unref();
+                pendingOffline.set(userId, timer);
             }
         });
     });

@@ -1,7 +1,14 @@
 import { Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-nexo-dev';
+const JWT_SECRET = process.env.JWT_SECRET;
+
+function getJwtSecret(): string {
+    if (!JWT_SECRET) {
+        throw new Error('JWT_SECRET environment variable is not set');
+    }
+    return JWT_SECRET;
+}
 
 export interface AuthenticatedSocket extends Socket {
     data: {
@@ -17,7 +24,7 @@ export const socketAuth = (socket: Socket, next: (err?: Error) => void) => {
     }
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
+        const decoded = jwt.verify(token, getJwtSecret()) as { userId: string };
 
         // Inyectamos el userId en la propiedad data (recomendado por la documentación de Socket.io 4+)
         socket.data.userId = decoded.userId;

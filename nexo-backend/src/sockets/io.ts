@@ -1,4 +1,7 @@
 import { Server } from 'socket.io';
+import { prisma } from '../db/prisma';
+import { invalidateSendContext, removeSocketFromVoice } from './index';
+import { getVoiceParticipant } from './voiceState';
 
 // Global reference to the Socket.io server for emitting from REST controllers
 let io: Server | null = null;
@@ -14,12 +17,44 @@ export const emitCommunityUpdated = (communityId: string) => {
     io?.to(`community:${communityId}`).emit('community_updated', { communityId });
 };
 
-// Notifies a user that they were kicked/banned/removed from a community
+// Puts every socket of a user into the community room, server-side, right
+// after they create or join a community. Older clients also emit
+// `join_community_room` themselves; both paths are idempotent.
+export const emitJoinCommunityRoom = (userId: string, communityId: string) => {
+    io?.in(`user:${userId}`).socketsJoin(`community:${communityId}`);
+};
+
+// Notifies a user that they were kicked/banned/removed from a community and
+// severs every realtime tie: cached send permission, voice session and the
+// channel/community rooms of that community.
 export const emitRemovedFromCommunity = async (userId: string, communityId: string, reason: 'kick' | 'ban' | 'deleted') => {
     if (!io) return;
-    io.to(`user:${userId}`).emit('removed_from_community', { communityId, reason });
-    // Remove their sockets from the community room
-    io.in(`user:${userId}`).socketsLeave(`community:${communityId}`);
+    const server = io;
+    server.to(`user:${userId}`).emit('removed_from_community', { communityId, reason });
+
+    invalidateSendContext(userId);
+
+    try {
+        const channels = await prisma.channel.findMany({
+            where: { category: { communityId } },
+            select: { id: true },
+        });
+        const channelIds = channels.map(c => c.id);
+        const rooms = [`community:${communityId}`, ...channelIds];
+
+        const sockets = await server.in(`user:${userId}`).fetchSockets();
+        for (const remote of sockets) {
+            const voice = getVoiceParticipant(remote.id);
+            if (voice && voice.communityId === communityId) {
+                await removeSocketFromVoice(server, remote.id);
+            }
+            for (const room of rooms) remote.leave(room);
+        }
+    } catch (error) {
+        console.error('[Socket.io] Error cleaning up removed member rooms:', error);
+        // Fallback: at least drop the community room.
+        server.in(`user:${userId}`).socketsLeave(`community:${communityId}`);
+    }
 };
 
 // ===================== Social event payload interfaces =====================
