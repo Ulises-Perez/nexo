@@ -1,7 +1,12 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+/// Verifies that `origin` matches the window's own origin, so the frontend
+/// cannot ask to reset WebView2 permissions for an arbitrary origin.
+fn verify_origin(window: &tauri::WebviewWindow, origin: &str) -> Result<(), String> {
+    let window_url: tauri::Url = window.url().map_err(|e| e.to_string())?;
+    let expected = window_url.origin().ascii_serialization();
+    if expected.trim() != origin.trim() {
+        return Err("Origin mismatch.".into());
+    }
+    Ok(())
 }
 
 /// Resets the mic/camera permission WebView2 remembered for this app's origin back
@@ -10,9 +15,13 @@ fn greet(name: &str) -> String {
 /// since there is no web API a page can call to reset its own permission state.
 /// `origin` is passed from JS (`window.location.origin`) since it differs between
 /// dev (http://localhost:1420) and the packaged build (http://tauri.localhost).
+/// It is verified against the window's own origin before use, since a Tauri
+/// command is callable from any script running in the webview.
 #[cfg(windows)]
 #[tauri::command]
 async fn reset_media_permissions(window: tauri::WebviewWindow, origin: String) -> Result<(), String> {
+    verify_origin(&window, &origin)?;
+
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2Profile4, ICoreWebView2_13, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
         COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
@@ -66,7 +75,9 @@ async fn reset_media_permissions(window: tauri::WebviewWindow, origin: String) -
 
 #[cfg(not(windows))]
 #[tauri::command]
-async fn reset_media_permissions(_origin: String) -> Result<(), String> {
+async fn reset_media_permissions(window: tauri::WebviewWindow, origin: String) -> Result<(), String> {
+    verify_origin(&window, &origin)?;
+
     Err("Restablecer permisos solo está disponible en Windows.".into())
 }
 
@@ -76,7 +87,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![greet, reset_media_permissions])
+        .invoke_handler(tauri::generate_handler![reset_media_permissions])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

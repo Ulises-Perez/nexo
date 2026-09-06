@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "nexo-desktop",
+        "title": "Nexo",
         "width": 1200,
         "height": 800,
         "minWidth": 1000,
@@ -22,7 +22,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' https: http://localhost:* http://127.0.0.1:* blob: data:; media-src 'self' https: http://localhost:* http://127.0.0.1:* blob: mediastream:; connect-src 'self' https://nexo-production-2df4.up.railway.app wss://nexo-production-2df4.up.railway.app https://*.workers.dev https://*.r2.dev http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self';",
+      "dangerousDisableAssetCspModification": false
     }
   },
   "bundle": {
