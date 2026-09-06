@@ -4,6 +4,9 @@ import { ChannelController } from '../controllers/channel.controller';
 import { RoleController } from '../controllers/role.controller';
 import { MemberController } from '../controllers/member.controller';
 import { requireAuth } from '../middlewares/requireAuth';
+import { validate } from '../middlewares/validate';
+import { createCommunitySchema, updateCommunitySchema } from '../schemas/community.schema';
+import { createChannelSchema, createCategorySchema } from '../schemas/channel.schema';
 
 const router = Router();
 
@@ -11,10 +14,10 @@ const router = Router();
 router.get('/', requireAuth, CommunityController.getUserCommunities);
 
 // Endpoint: POST /api/communities (Crear comunidad)
-router.post('/', requireAuth, CommunityController.createCommunity);
+router.post('/', requireAuth, validate({ body: createCommunitySchema }), CommunityController.createCommunity);
 
 // Endpoint: PATCH /api/communities/:id (Editar comunidad)
-router.patch('/:id', requireAuth, CommunityController.updateCommunity);
+router.patch('/:id', requireAuth, validate({ body: updateCommunitySchema }), CommunityController.updateCommunity);
 
 // Endpoint: DELETE /api/communities/:id (Eliminar comunidad)
 router.delete('/:id', requireAuth, CommunityController.deleteCommunity);
@@ -26,8 +29,8 @@ router.post('/:id/invite', requireAuth, CommunityController.generateInviteCode);
 router.delete('/:id/leave', requireAuth, CommunityController.leaveCommunity);
 
 // Canales y categorías
-router.post('/:id/channels', requireAuth, ChannelController.createChannel);
-router.post('/:id/categories', requireAuth, ChannelController.createCategory);
+router.post('/:id/channels', requireAuth, validate({ body: createChannelSchema }), ChannelController.createChannel);
+router.post('/:id/categories', requireAuth, validate({ body: createCategorySchema }), ChannelController.createCategory);
 
 // Roles
 router.get('/:id/roles', requireAuth, RoleController.getRoles);
