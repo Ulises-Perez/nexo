@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../db/prisma';
-import { Permissions, getMemberContext, hasPermission, getCommunityIdOfChannel } from '../lib/permissions';
+import { Permissions, getMemberContext, hasPermission, getCommunityIdOfChannel, isUserMemberOfChannel } from '../lib/permissions';
 import { emitCommunityUpdated } from '../sockets/io';
 
 // Los canales de texto usan nombres estilo Discord: minúsculas y guiones
@@ -15,6 +15,18 @@ export class ChannelController {
         try {
             const channelId = req.params.id as string;
             const userId = req.user?.id;
+
+            if (!userId) {
+                res.status(401).json({ error: 'Unauthorized' });
+                return;
+            }
+
+            // Only conversation participants (DM) or community members may read a channel.
+            const hasAccess = await isUserMemberOfChannel(userId, channelId);
+            if (!hasAccess) {
+                res.status(403).json({ error: 'Forbidden' });
+                return;
+            }
 
             // Paginación por cursor: `before` apunta al mensaje más antiguo ya
             // cargado por el cliente; `limit` controla el tamaño de página
@@ -54,18 +66,16 @@ export class ChannelController {
             // Mark messages as read (messages not sent by current user that are unread).
             // Fire-and-forget, off the critical path — the response is already sent,
             // so this write no longer adds latency to every fetch/revalidate poll.
-            if (userId) {
-                prisma.message.updateMany({
-                    where: {
-                        channelId,
-                        userId: { not: userId },
-                        readAt: null
-                    },
-                    data: {
-                        readAt: new Date()
-                    }
-                }).catch(err => console.error('[ChannelController - getMessages markRead Error]', err));
-            }
+            prisma.message.updateMany({
+                where: {
+                    channelId,
+                    userId: { not: userId },
+                    readAt: null
+                },
+                data: {
+                    readAt: new Date()
+                }
+            }).catch(err => console.error('[ChannelController - getMessages markRead Error]', err));
         } catch (error) {
             console.error('[ChannelController - getMessages Error]', error);
             res.status(500).json({ error: 'Internal Server Error' });

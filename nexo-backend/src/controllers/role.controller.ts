@@ -1,6 +1,14 @@
 import { Request, Response } from 'express';
 import { prisma } from '../db/prisma';
-import { Permissions, ALL_PERMISSIONS, getMemberContext, hasPermission } from '../lib/permissions';
+import {
+    Permissions,
+    ALL_PERMISSIONS,
+    getMemberContext,
+    hasPermission,
+    getHighestRolePosition,
+    canManageMember,
+    canManageRole,
+} from '../lib/permissions';
 import { emitCommunityUpdated } from '../sockets/io';
 
 function sanitizePermissions(permissions: unknown): number {
@@ -122,6 +130,12 @@ export class RoleController {
                 return;
             }
 
+            const actorHighest = await getHighestRolePosition(ctx!.memberId);
+            if (!canManageRole(ctx!, actorHighest, role.position)) {
+                res.status(403).json({ error: 'You can only edit roles below your highest role' });
+                return;
+            }
+
             const data: { name?: string; color?: string | null; permissions?: number } = {};
             if (name !== undefined) {
                 if (!name || name.trim() === '') {
@@ -178,6 +192,12 @@ export class RoleController {
                 return;
             }
 
+            const actorHighest = await getHighestRolePosition(ctx!.memberId);
+            if (!canManageRole(ctx!, actorHighest, role.position)) {
+                res.status(403).json({ error: 'You can only delete roles below your highest role' });
+                return;
+            }
+
             await prisma.role.delete({ where: { id: roleId } });
 
             emitCommunityUpdated(communityId);
@@ -212,8 +232,14 @@ export class RoleController {
                 return;
             }
 
+            if (!roleIds.every((id: unknown) => typeof id === 'string')) {
+                res.status(400).json({ error: 'roleIds must contain only strings' });
+                return;
+            }
+
             const member = await prisma.communityMember.findUnique({
-                where: { userId_communityId: { userId: targetUserId, communityId } }
+                where: { userId_communityId: { userId: targetUserId, communityId } },
+                include: { community: { select: { ownerId: true } } }
             });
 
             if (!member) {
@@ -221,11 +247,37 @@ export class RoleController {
                 return;
             }
 
+            // Hierarchy: nobody edits the owner's roles, a non-owner cannot edit
+            // their own roles, and the target must sit below the actor.
+            if (targetUserId === userId && !ctx!.isOwner) {
+                res.status(403).json({ error: 'You cannot change your own roles' });
+                return;
+            }
+
+            const targetIsOwner = member.community.ownerId === targetUserId;
+            const [actorHighest, targetHighest] = await Promise.all([
+                getHighestRolePosition(ctx!.memberId),
+                getHighestRolePosition(member.id),
+            ]);
+
+            if (!canManageMember(ctx!, actorHighest, targetIsOwner, targetHighest)) {
+                res.status(403).json({ error: 'You can only manage members below your highest role' });
+                return;
+            }
+
             // Validar que todos los roles pertenezcan a esta comunidad
             const validRoles = await prisma.role.findMany({
                 where: { id: { in: roleIds }, communityId },
-                select: { id: true }
+                select: { id: true, position: true }
             });
+
+            // Every role being assigned must also be below the actor's highest role.
+            const tooHigh = validRoles.find(r => !canManageRole(ctx!, actorHighest, r.position));
+            if (tooHigh) {
+                res.status(403).json({ error: 'You can only assign roles below your highest role' });
+                return;
+            }
+
             const validRoleIds = validRoles.map(r => r.id);
 
             await prisma.$transaction([

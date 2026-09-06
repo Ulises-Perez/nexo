@@ -1,6 +1,12 @@
 import { Request, Response } from 'express';
 import { prisma } from '../db/prisma';
-import { Permissions, getMemberContext, hasPermission } from '../lib/permissions';
+import {
+    Permissions,
+    getMemberContext,
+    hasPermission,
+    getHighestRolePosition,
+    canManageMember,
+} from '../lib/permissions';
 import { emitCommunityUpdated, emitMemberUnbanned, emitRemovedFromCommunity } from '../sockets/io';
 
 export class MemberController {
@@ -93,6 +99,24 @@ export class MemberController {
                 return;
             }
 
+            const targetMember = await prisma.communityMember.findUnique({
+                where: { userId_communityId: { userId: targetUserId, communityId } },
+                select: { id: true }
+            });
+            if (!targetMember) {
+                res.status(404).json({ error: 'Member not found' });
+                return;
+            }
+
+            const [actorHighest, targetHighest] = await Promise.all([
+                getHighestRolePosition(ctx!.memberId),
+                getHighestRolePosition(targetMember.id),
+            ]);
+            if (!canManageMember(ctx!, actorHighest, false, targetHighest)) {
+                res.status(403).json({ error: 'You can only kick members below your highest role' });
+                return;
+            }
+
             await prisma.communityMember.delete({
                 where: { userId_communityId: { userId: targetUserId, communityId } }
             });
@@ -142,6 +166,20 @@ export class MemberController {
 
             if (targetUserId === userId) {
                 res.status(400).json({ error: 'You cannot ban yourself' });
+                return;
+            }
+
+            // A non-member can be banned pre-emptively; they have no roles (-1).
+            const targetMember = await prisma.communityMember.findUnique({
+                where: { userId_communityId: { userId: targetUserId, communityId } },
+                select: { id: true }
+            });
+            const [actorHighest, targetHighest] = await Promise.all([
+                getHighestRolePosition(ctx!.memberId),
+                targetMember ? getHighestRolePosition(targetMember.id) : Promise.resolve(-1),
+            ]);
+            if (!canManageMember(ctx!, actorHighest, false, targetHighest)) {
+                res.status(403).json({ error: 'You can only ban members below your highest role' });
                 return;
             }
 

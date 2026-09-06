@@ -49,6 +49,72 @@ export function hasPermission(ctx: MemberContext | null, flag: number): boolean 
     return (ctx.permissions & flag) === flag;
 }
 
+// Highest role position held by a member (-1 when the member has no roles).
+// Used for hierarchy checks: an actor can only act on roles/members strictly
+// below their own highest role, unless they are the community owner.
+export async function getHighestRolePosition(memberId: string): Promise<number> {
+    const top = await prisma.memberRole.findFirst({
+        where: { memberId },
+        orderBy: { role: { position: 'desc' } },
+        select: { role: { select: { position: true } } }
+    });
+    return top?.role.position ?? -1;
+}
+
+// Whether `actor` may kick/ban/re-role a target member.
+export function canManageMember(
+    actor: MemberContext,
+    actorHighest: number,
+    targetIsOwner: boolean,
+    targetHighest: number
+): boolean {
+    if (targetIsOwner) return false;
+    if (actor.isOwner) return true;
+    return targetHighest < actorHighest;
+}
+
+// Whether `actor` may edit/delete/assign a role at `rolePosition`.
+export function canManageRole(actor: MemberContext, actorHighest: number, rolePosition: number): boolean {
+    if (actor.isOwner) return true;
+    return rolePosition < actorHighest;
+}
+
+// Whether `userId` can access `channelId`: DM channels require being one of the
+// two conversation participants; community channels require membership.
+// Deliberately does NOT catch DB errors: a transient failure (e.g. Postgres
+// restarting) must propagate instead of being mistaken for "access denied".
+export async function isUserMemberOfChannel(userId: string, channelId: string): Promise<boolean> {
+    const channel = await prisma.channel.findUnique({
+        where: { id: channelId },
+        include: {
+            category: {
+                include: {
+                    community: {
+                        include: {
+                            members: {
+                                where: { userId }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    if (!channel) return false;
+
+    if (channel.type === 'dm') {
+        const conversation = await prisma.conversation.findUnique({
+            where: { channelId },
+            select: { userAId: true, userBId: true }
+        });
+        if (!conversation) return false;
+        return conversation.userAId === userId || conversation.userBId === userId;
+    }
+
+    return channel.category?.community?.members?.some(m => m.userId === userId) ?? false;
+}
+
 // Resuelve la comunidad a la que pertenece un canal (null para canales DM)
 export async function getCommunityIdOfChannel(channelId: string): Promise<string | null> {
     const channel = await prisma.channel.findUnique({
