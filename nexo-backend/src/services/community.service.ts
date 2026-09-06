@@ -7,6 +7,7 @@ import {
     getIO,
     MemberJoinedPayload,
 } from '../sockets/io';
+import { collectAttachmentKeys, purgeAttachmentObjects } from '../lib/attachmentCleanup';
 import { forbidden, notFound, badRequest, isPrismaError } from '../lib/errors';
 import { generateInviteCode as createInviteCode } from '../lib/inviteCode';
 import type { CreateCommunityInput, UpdateCommunityInput } from '../schemas/community.schema';
@@ -35,7 +36,7 @@ export async function getUserCommunities(userId: string) {
             members: {
                 where: { userId },
                 include: {
-                    roles: { include: { role: { select: { permissions: true } } } },
+                    roles: { select: { roleId: true, role: { select: { permissions: true } } } },
                 },
             },
             _count: { select: { members: true } },
@@ -47,13 +48,14 @@ export async function getUserCommunities(userId: string) {
     return communities.map(({ members, ...community }) => {
         const myMember = members[0];
         const isOwner = community.ownerId === userId;
+        const myRoleIds = myMember ? myMember.roles.map((mr) => mr.roleId) : [];
         let myPermissions = myMember
             ? myMember.roles.reduce((acc, mr) => acc | mr.role.permissions, 0)
             : 0;
         if (isOwner || (myPermissions & Permissions.ADMINISTRATOR)) {
             myPermissions = ALL_PERMISSIONS;
         }
-        return { ...community, isOwner, myPermissions, memberCount: community._count.members };
+        return { ...community, isOwner, myPermissions, myRoleIds, memberCount: community._count.members };
     });
 }
 
@@ -105,7 +107,10 @@ export async function updateCommunity(userId: string, communityId: string, data:
         data: updateData,
     });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, {
+        type: 'community.updated',
+        community: { id: updated.id, name: updated.name, iconUrl: updated.iconUrl, description: updated.description },
+    });
     return updated;
 }
 
@@ -117,7 +122,16 @@ export async function deleteCommunity(userId: string, communityId: string) {
         throw forbidden('Only the owner can delete the community');
     }
 
+    let attachmentKeys: string[] = [];
+    try {
+        attachmentKeys = await collectAttachmentKeys({ communityId });
+    } catch (error) {
+        console.error('[community.service] Error collecting attachment keys before community delete:', error);
+    }
+
     await prisma.community.delete({ where: { id: communityId } });
+
+    purgeAttachmentObjects(attachmentKeys);
 
     // Notify and evict connected members only after the delete has committed.
     getIO()?.to(`community:${communityId}`).emit('community_deleted', { communityId });

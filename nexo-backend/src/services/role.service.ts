@@ -67,7 +67,10 @@ export async function createRole(userId: string, communityId: string, input: Rol
         },
     });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, {
+        type: 'role.created',
+        role: { id: role.id, name: role.name, color: role.color, permissions: role.permissions, position: role.position },
+    });
     return role;
 }
 
@@ -100,7 +103,10 @@ export async function updateRole(userId: string, communityId: string, roleId: st
 
     const updated = await prisma.role.update({ where: { id: roleId }, data });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, {
+        type: 'role.updated',
+        role: { id: updated.id, name: updated.name, color: updated.color, permissions: updated.permissions, position: updated.position },
+    });
     return updated;
 }
 
@@ -122,7 +128,7 @@ export async function deleteRole(userId: string, communityId: string, roleId: st
 
     await prisma.role.delete({ where: { id: roleId } });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, { type: 'role.deleted', roleId });
     return { success: true };
 }
 
@@ -183,6 +189,6 @@ export async function setMemberRoles(
         }),
     ]);
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, { type: 'member.roles', userId: targetUserId, roleIds: validRoleIds });
     return { success: true, roleIds: validRoleIds };
 }

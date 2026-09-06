@@ -2,7 +2,7 @@ import type { Ref } from 'vue';
 import type { Socket } from 'socket.io-client';
 import { useAuthStore } from '../auth';
 import { useFriendsStore } from '../friends';
-import { useCommunityStore } from '../community';
+import { useCommunityStore, type CommunityChange } from '../community';
 import { useVoiceStore } from '../voice';
 import router from '../../router';
 import { resetSessionState } from '../../composables/useSessionReset';
@@ -221,10 +221,16 @@ export function registerChatSocketHandlers(socket: Socket, ctx: ChatSocketContex
         dms.noteTyping(data.userId, data.username);
     });
 
-    // La estructura de la comunidad cambió (canales, roles, nombre...) -> refrescar
-    socket.on('community_updated', async (_data: { communityId: string }) => {
+    // La estructura de la comunidad cambió (canales, roles, nombre...). Si el
+    // payload trae un delta estructurado, lo aplicamos en el lugar; si no (o
+    // si la comunidad no está en el store todavía), recurrimos al refetch
+    // completo como antes.
+    socket.on('community_updated', async (data: { communityId: string; change?: CommunityChange }) => {
         const communityStore = useCommunityStore();
-        await communityStore.fetchCommunities();
+        const applied = data.change ? communityStore.applyCommunityChange(data.communityId, data.change) : false;
+        if (!applied) {
+            await communityStore.fetchCommunities();
+        }
 
         // Si el canal activo ya no existe, limpiar la vista
         if (communityStore.activeCommunityId && communityStore.activeChannelId) {

@@ -7,6 +7,7 @@ import {
     isUserMemberOfChannel,
 } from '../lib/permissions';
 import { emitCommunityUpdated } from '../sockets/io';
+import { collectAttachmentKeys, purgeAttachmentObjects } from '../lib/attachmentCleanup';
 import { forbidden, notFound, badRequest } from '../lib/errors';
 import type {
     CreateChannelInput,
@@ -98,7 +99,10 @@ export async function createChannel(userId: string, communityId: string, data: C
         },
     });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, {
+        type: 'channel.created',
+        channel: { id: channel.id, name: channel.name, type: channel.type, order: channel.order, categoryId: channel.categoryId! },
+    });
     return channel;
 }
 
@@ -117,7 +121,10 @@ export async function updateChannel(userId: string, channelId: string, data: Upd
         data: { name: normalizeChannelName(data.name, existing?.type ?? 'text') },
     });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, {
+        type: 'channel.updated',
+        channel: { id: channel.id, name: channel.name, type: channel.type, order: channel.order, categoryId: channel.categoryId! },
+    });
     return channel;
 }
 
@@ -130,10 +137,18 @@ export async function deleteChannel(userId: string, channelId: string) {
         throw forbidden('Missing permission: MANAGE_CHANNELS');
     }
 
+    let attachmentKeys: string[] = [];
+    try {
+        attachmentKeys = await collectAttachmentKeys({ channelId });
+    } catch (error) {
+        console.error('[channel.service] Error collecting attachment keys before channel delete:', error);
+    }
+
     const { count } = await prisma.channel.deleteMany({ where: { id: channelId } });
     if (count === 0) throw notFound('Channel not found');
 
-    emitCommunityUpdated(communityId);
+    purgeAttachmentObjects(attachmentKeys);
+    emitCommunityUpdated(communityId, { type: 'channel.deleted', channelId });
     return { success: true };
 }
 
@@ -156,7 +171,10 @@ export async function createCategory(userId: string, communityId: string, data: 
         },
     });
 
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, {
+        type: 'category.created',
+        category: { id: category.id, name: category.name, order: category.order },
+    });
     return category;
 }
 
@@ -174,7 +192,10 @@ export async function updateCategory(userId: string, categoryId: string, data: U
         data: { name: data.name },
     });
 
-    emitCommunityUpdated(category.communityId);
+    emitCommunityUpdated(category.communityId, {
+        type: 'category.updated',
+        category: { id: updated.id, name: updated.name, order: updated.order },
+    });
     return updated;
 }
 
@@ -187,10 +208,18 @@ export async function deleteCategory(userId: string, categoryId: string) {
         throw forbidden('Missing permission: MANAGE_CHANNELS');
     }
 
+    let attachmentKeys: string[] = [];
+    try {
+        attachmentKeys = await collectAttachmentKeys({ categoryId });
+    } catch (error) {
+        console.error('[channel.service] Error collecting attachment keys before category delete:', error);
+    }
+
     // Cascades to the category's channels (and their messages).
     const { count } = await prisma.category.deleteMany({ where: { id: categoryId } });
     if (count === 0) throw notFound('Category not found');
 
-    emitCommunityUpdated(category.communityId);
+    purgeAttachmentObjects(attachmentKeys);
+    emitCommunityUpdated(category.communityId, { type: 'category.deleted', categoryId });
     return { success: true };
 }

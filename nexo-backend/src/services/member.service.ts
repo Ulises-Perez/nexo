@@ -85,7 +85,7 @@ export async function kickMember(userId: string, communityId: string, targetUser
     });
 
     await emitRemovedFromCommunity(targetUserId, communityId, 'kick');
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, { type: 'member.removed', userId: targetUserId });
     return { success: true };
 }
 
@@ -149,7 +149,7 @@ export async function banMember(
     }
 
     await emitRemovedFromCommunity(targetUserId, communityId, 'ban');
-    emitCommunityUpdated(communityId);
+    emitCommunityUpdated(communityId, { type: 'member.removed', userId: targetUserId });
     return { success: true };
 }
 

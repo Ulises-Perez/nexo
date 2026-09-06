@@ -16,6 +16,10 @@ export const Permissions = {
     CREATE_INVITES:   1 << 7,
 } as const;
 
+// Mirrors the backend's ALL_PERMISSIONS shortcut (lib/permissions.ts): the
+// OR of every known permission bit, granted to owners and ADMINISTRATOR holders.
+export const ALL_PERMISSIONS = Object.values(Permissions).reduce((a, b) => a | b, 0);
+
 export interface Channel {
     id: string;
     categoryId: string;
@@ -80,8 +84,23 @@ export interface Community {
     roles: Role[];
     isOwner: boolean;
     myPermissions: number;
+    myRoleIds: string[];
     memberCount: number;
 }
+
+// Structural delta describing exactly what changed inside a community,
+// mirrors `CommunityChange` in nexo-backend/src/sockets/io.ts. Kept as a
+// local copy since desktop and backend don't share a package.
+export type CommunityChange =
+    | { type: 'community.updated'; community: { id: string; name: string; iconUrl: string | null; description: string | null } }
+    | { type: 'channel.created' | 'channel.updated'; channel: { id: string; name: string; type: string; order: number; categoryId: string } }
+    | { type: 'channel.deleted'; channelId: string }
+    | { type: 'category.created' | 'category.updated'; category: { id: string; name: string; order: number } }
+    | { type: 'category.deleted'; categoryId: string }
+    | { type: 'role.created' | 'role.updated'; role: { id: string; name: string; color: string | null; permissions: number; position: number } }
+    | { type: 'role.deleted'; roleId: string }
+    | { type: 'member.roles'; userId: string; roleIds: string[] }
+    | { type: 'member.removed'; userId: string };
 
 export const useCommunityStore = defineStore('community', () => {
     const communities = ref<Community[]>([]);
@@ -159,6 +178,206 @@ export const useCommunityStore = defineStore('community', () => {
         return (community.myPermissions & flag) === flag;
     };
 
+    // Recomputes `myPermissions` for a community from its current
+    // `myRoleIds`/`roles`, mirroring the backend's ALL_PERMISSIONS shortcut
+    // in getUserCommunities/canManage* (community.service.ts / permissions.ts).
+    const recomputeMyPermissions = (community: Community) => {
+        if (community.isOwner) {
+            community.myPermissions = ALL_PERMISSIONS;
+            return;
+        }
+        const heldRoles = community.roles.filter(r => community.myRoleIds.includes(r.id));
+        let permissions = heldRoles.reduce((acc, r) => acc | r.permissions, 0);
+        if (permissions & Permissions.ADMINISTRATOR) {
+            permissions = ALL_PERMISSIONS;
+        }
+        community.myPermissions = permissions;
+    };
+
+    // Locates the community that currently owns a channel/category. Some REST
+    // mutations (rename/delete) only take the channel/category id, not the
+    // community id, so callers need this to route the resulting local patch.
+    const findChannelCommunityId = (channelId: string): string | null => {
+        for (const community of communities.value) {
+            for (const category of community.categories) {
+                if (category.channels.some(ch => ch.id === channelId)) return community.id;
+            }
+        }
+        return null;
+    };
+
+    const findCategoryCommunityId = (categoryId: string): string | null => {
+        for (const community of communities.value) {
+            if (community.categories.some(cat => cat.id === categoryId)) return community.id;
+        }
+        return null;
+    };
+
+    // Runs `mutate` over the loaded member lists of a community (the active
+    // list and the persisted cache) and schedules a cache persist.
+    const patchMemberRoles = (communityId: string, mutate: (members: CommunityMember[]) => void) => {
+        if (activeMembersCommunityId.value === communityId) {
+            mutate(activeMembers.value);
+        }
+        const cachedMembers = membersCache.value.get(communityId);
+        if (cachedMembers && cachedMembers !== activeMembers.value) {
+            mutate(cachedMembers);
+        }
+        if (cachedMembers) schedulePersistMembers();
+    };
+
+    // Applies a structural delta (see CommunityChange) to `communities` (and,
+    // where relevant, activeMembers/membersCache) in place, without a
+    // refetch. Used both by the REST mutation helpers below (from the
+    // response they just got) and by the `community_updated` socket handler
+    // (from the broadcasted change) — applying the same patch twice is a
+    // no-op, so the two paths never conflict. Returns false when the
+    // community isn't known locally (caller should fall back to a refetch).
+    const applyCommunityChange = (communityId: string, change: CommunityChange): boolean => {
+        const community = communities.value.find(c => c.id === communityId);
+        if (!community) return false;
+
+        switch (change.type) {
+            case 'community.updated': {
+                community.name = change.community.name;
+                community.iconUrl = change.community.iconUrl;
+                community.description = change.community.description;
+                break;
+            }
+            case 'channel.created':
+            case 'channel.updated': {
+                const category = community.categories.find(cat => cat.id === change.channel.categoryId);
+                if (category) {
+                    const channel: Channel = {
+                        id: change.channel.id,
+                        categoryId: change.channel.categoryId,
+                        name: change.channel.name,
+                        type: change.channel.type,
+                        order: change.channel.order,
+                    };
+                    const idx = category.channels.findIndex(ch => ch.id === channel.id);
+                    if (idx === -1) category.channels.push(channel);
+                    else category.channels.splice(idx, 1, channel);
+                    category.channels.sort((a, b) => a.order - b.order);
+                }
+                break;
+            }
+            case 'channel.deleted': {
+                for (const category of community.categories) {
+                    const idx = category.channels.findIndex(ch => ch.id === change.channelId);
+                    if (idx !== -1) {
+                        category.channels.splice(idx, 1);
+                        break;
+                    }
+                }
+                break;
+            }
+            case 'category.created':
+            case 'category.updated': {
+                const idx = community.categories.findIndex(cat => cat.id === change.category.id);
+                if (idx === -1) {
+                    community.categories.push({
+                        id: change.category.id,
+                        communityId,
+                        name: change.category.name,
+                        order: change.category.order,
+                        channels: [],
+                    });
+                } else {
+                    community.categories[idx].name = change.category.name;
+                    community.categories[idx].order = change.category.order;
+                }
+                community.categories.sort((a, b) => a.order - b.order);
+                break;
+            }
+            case 'category.deleted': {
+                const idx = community.categories.findIndex(cat => cat.id === change.categoryId);
+                if (idx !== -1) community.categories.splice(idx, 1);
+                break;
+            }
+            case 'role.created':
+            case 'role.updated': {
+                const role: Role = {
+                    id: change.role.id,
+                    communityId,
+                    name: change.role.name,
+                    color: change.role.color,
+                    permissions: change.role.permissions,
+                    position: change.role.position,
+                };
+                const idx = community.roles.findIndex(r => r.id === role.id);
+                if (idx === -1) community.roles.push(role);
+                else community.roles.splice(idx, 1, role);
+                community.roles.sort((a, b) => b.position - a.position);
+                if (community.myRoleIds.includes(role.id)) recomputeMyPermissions(community);
+                // Members already loaded hold their own copies of the role
+                // objects (name/color drive the member list and username
+                // colors), so refresh those copies too.
+                patchMemberRoles(communityId, members => {
+                    for (const member of members) {
+                        const i = member.roles.findIndex(r => r.id === role.id);
+                        if (i !== -1) member.roles.splice(i, 1, role);
+                    }
+                });
+                break;
+            }
+            case 'role.deleted': {
+                const idx = community.roles.findIndex(r => r.id === change.roleId);
+                if (idx !== -1) community.roles.splice(idx, 1);
+                if (community.myRoleIds.includes(change.roleId)) {
+                    community.myRoleIds = community.myRoleIds.filter(id => id !== change.roleId);
+                    recomputeMyPermissions(community);
+                }
+                patchMemberRoles(communityId, members => {
+                    for (const member of members) {
+                        const i = member.roles.findIndex(r => r.id === change.roleId);
+                        if (i !== -1) member.roles.splice(i, 1);
+                    }
+                });
+                break;
+            }
+            case 'member.roles': {
+                const authStore = useAuthStore();
+                if (change.userId === authStore.user?.id) {
+                    community.myRoleIds = change.roleIds;
+                    recomputeMyPermissions(community);
+                }
+                const newRoles = community.roles.filter(r => change.roleIds.includes(r.id));
+                if (activeMembersCommunityId.value === communityId) {
+                    const member = activeMembers.value.find(m => m.userId === change.userId);
+                    if (member) member.roles = newRoles;
+                }
+                const cachedMembers = membersCache.value.get(communityId);
+                if (cachedMembers) {
+                    const cachedMember = cachedMembers.find(m => m.userId === change.userId);
+                    if (cachedMember) {
+                        cachedMember.roles = newRoles;
+                        schedulePersistMembers();
+                    }
+                }
+                break;
+            }
+            case 'member.removed': {
+                if (activeMembersCommunityId.value === communityId) {
+                    const idx = activeMembers.value.findIndex(m => m.userId === change.userId);
+                    if (idx !== -1) activeMembers.value.splice(idx, 1);
+                }
+                const cachedMembers = membersCache.value.get(communityId);
+                if (cachedMembers) {
+                    const idx = cachedMembers.findIndex(m => m.userId === change.userId);
+                    if (idx !== -1) {
+                        cachedMembers.splice(idx, 1);
+                        schedulePersistMembers();
+                    }
+                }
+                community.memberCount = Math.max(0, community.memberCount - 1);
+                break;
+            }
+        }
+
+        return true;
+    };
+
     const fetchCommunities = async () => {
         const authStore = useAuthStore();
         if (!authStore.token) return;
@@ -166,7 +385,7 @@ export const useCommunityStore = defineStore('community', () => {
         isLoading.value = true;
         try {
             const response = await api.get('/communities');
-            communities.value = response.data;
+            communities.value = (response.data as Community[]).map((c) => ({ ...c, myRoleIds: c.myRoleIds ?? [] }));
 
             // NO auto-seleccionar comunidad - el usuario debe elegir explícitamente
             // La vista de Friends se muestra cuando no hay comunidad activa
@@ -236,8 +455,14 @@ export const useCommunityStore = defineStore('community', () => {
 
     const updateCommunity = async (communityId: string, data: { name?: string; iconUrl?: string; description?: string }): Promise<boolean> => {
         try {
-            await api.patch(`/communities/${communityId}`, data);
-            await fetchCommunities();
+            const response = await api.patch(`/communities/${communityId}`, data);
+            const updated = response.data;
+            if (!applyCommunityChange(communityId, {
+                type: 'community.updated',
+                community: { id: updated.id, name: updated.name, iconUrl: updated.iconUrl, description: updated.description },
+            })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error updating community:', error);
@@ -260,8 +485,14 @@ export const useCommunityStore = defineStore('community', () => {
 
     const createChannel = async (communityId: string, categoryId: string, name: string, type: 'text' | 'voice'): Promise<boolean> => {
         try {
-            await api.post(`/communities/${communityId}/channels`, { name, type, categoryId });
-            await fetchCommunities();
+            const response = await api.post(`/communities/${communityId}/channels`, { name, type, categoryId });
+            const channel = response.data;
+            if (!applyCommunityChange(communityId, {
+                type: 'channel.created',
+                channel: { id: channel.id, name: channel.name, type: channel.type, order: channel.order, categoryId: channel.categoryId },
+            })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error creating channel:', error);
@@ -271,8 +502,15 @@ export const useCommunityStore = defineStore('community', () => {
 
     const renameChannel = async (channelId: string, name: string): Promise<boolean> => {
         try {
-            await api.patch(`/channels/${channelId}`, { name });
-            await fetchCommunities();
+            const response = await api.patch(`/channels/${channelId}`, { name });
+            const channel = response.data;
+            const communityId = findChannelCommunityId(channelId);
+            if (!communityId || !applyCommunityChange(communityId, {
+                type: 'channel.updated',
+                channel: { id: channel.id, name: channel.name, type: channel.type, order: channel.order, categoryId: channel.categoryId },
+            })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error renaming channel:', error);
@@ -281,9 +519,12 @@ export const useCommunityStore = defineStore('community', () => {
     };
 
     const deleteChannel = async (channelId: string): Promise<boolean> => {
+        const communityId = findChannelCommunityId(channelId);
         try {
             await api.delete(`/channels/${channelId}`);
-            await fetchCommunities();
+            if (!communityId || !applyCommunityChange(communityId, { type: 'channel.deleted', channelId })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error deleting channel:', error);
@@ -293,8 +534,14 @@ export const useCommunityStore = defineStore('community', () => {
 
     const createCategory = async (communityId: string, name: string): Promise<boolean> => {
         try {
-            await api.post(`/communities/${communityId}/categories`, { name });
-            await fetchCommunities();
+            const response = await api.post(`/communities/${communityId}/categories`, { name });
+            const category = response.data;
+            if (!applyCommunityChange(communityId, {
+                type: 'category.created',
+                category: { id: category.id, name: category.name, order: category.order },
+            })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error creating category:', error);
@@ -304,8 +551,15 @@ export const useCommunityStore = defineStore('community', () => {
 
     const renameCategory = async (categoryId: string, name: string): Promise<boolean> => {
         try {
-            await api.patch(`/categories/${categoryId}`, { name });
-            await fetchCommunities();
+            const response = await api.patch(`/categories/${categoryId}`, { name });
+            const category = response.data;
+            const communityId = findCategoryCommunityId(categoryId);
+            if (!communityId || !applyCommunityChange(communityId, {
+                type: 'category.updated',
+                category: { id: category.id, name: category.name, order: category.order },
+            })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error renaming category:', error);
@@ -314,9 +568,12 @@ export const useCommunityStore = defineStore('community', () => {
     };
 
     const deleteCategory = async (categoryId: string): Promise<boolean> => {
+        const communityId = findCategoryCommunityId(categoryId);
         try {
             await api.delete(`/categories/${categoryId}`);
-            await fetchCommunities();
+            if (!communityId || !applyCommunityChange(communityId, { type: 'category.deleted', categoryId })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error deleting category:', error);
@@ -329,8 +586,14 @@ export const useCommunityStore = defineStore('community', () => {
     const createRole = async (communityId: string, data: { name: string; color?: string | null; permissions?: number }): Promise<Role | null> => {
         try {
             const response = await api.post(`/communities/${communityId}/roles`, data);
-            await fetchCommunities();
-            return response.data;
+            const role = response.data;
+            if (!applyCommunityChange(communityId, {
+                type: 'role.created',
+                role: { id: role.id, name: role.name, color: role.color, permissions: role.permissions, position: role.position },
+            })) {
+                await fetchCommunities();
+            }
+            return role;
         } catch (error) {
             console.error('Error creating role:', error);
             return null;
@@ -339,8 +602,14 @@ export const useCommunityStore = defineStore('community', () => {
 
     const updateRole = async (communityId: string, roleId: string, data: { name?: string; color?: string | null; permissions?: number }): Promise<boolean> => {
         try {
-            await api.patch(`/communities/${communityId}/roles/${roleId}`, data);
-            await fetchCommunities();
+            const response = await api.patch(`/communities/${communityId}/roles/${roleId}`, data);
+            const role = response.data;
+            if (!applyCommunityChange(communityId, {
+                type: 'role.updated',
+                role: { id: role.id, name: role.name, color: role.color, permissions: role.permissions, position: role.position },
+            })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error updating role:', error);
@@ -351,7 +620,9 @@ export const useCommunityStore = defineStore('community', () => {
     const deleteRole = async (communityId: string, roleId: string): Promise<boolean> => {
         try {
             await api.delete(`/communities/${communityId}/roles/${roleId}`);
-            await fetchCommunities();
+            if (!applyCommunityChange(communityId, { type: 'role.deleted', roleId })) {
+                await fetchCommunities();
+            }
             return true;
         } catch (error) {
             console.error('Error deleting role:', error);
@@ -608,6 +879,7 @@ export const useCommunityStore = defineStore('community', () => {
         addActiveMember,
         getMembersCached,
         getMemberRoleColor,
+        applyCommunityChange,
         fetchCommunities,
         setActiveCommunity,
         setActiveChannel,

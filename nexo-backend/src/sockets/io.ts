@@ -12,9 +12,27 @@ export const setIO = (server: Server) => {
 
 export const getIO = (): Server | null => io;
 
-// Notifies all connected members of a community to refresh their data
-export const emitCommunityUpdated = (communityId: string) => {
-    io?.to(`community:${communityId}`).emit('community_updated', { communityId });
+// Structural delta describing exactly what changed inside a community, so
+// clients can patch their local state instead of refetching the whole
+// community tree. Older clients that only read `communityId` from the
+// `community_updated` payload keep working (they just ignore `change` and
+// refetch), so this stays additive.
+export type CommunityChange =
+    | { type: 'community.updated'; community: { id: string; name: string; iconUrl: string | null; description: string | null } }
+    | { type: 'channel.created' | 'channel.updated'; channel: { id: string; name: string; type: string; order: number; categoryId: string } }
+    | { type: 'channel.deleted'; channelId: string }
+    | { type: 'category.created' | 'category.updated'; category: { id: string; name: string; order: number } }
+    | { type: 'category.deleted'; categoryId: string }
+    | { type: 'role.created' | 'role.updated'; role: { id: string; name: string; color: string | null; permissions: number; position: number } }
+    | { type: 'role.deleted'; roleId: string }
+    | { type: 'member.roles'; userId: string; roleIds: string[] }
+    | { type: 'member.removed'; userId: string };
+
+// Notifies all connected members of a community to refresh their data. When
+// `change` is provided, clients able to understand it can apply it locally
+// instead of refetching.
+export const emitCommunityUpdated = (communityId: string, change?: CommunityChange) => {
+    io?.to(`community:${communityId}`).emit('community_updated', { communityId, change });
 };
 
 // Puts every socket of a user into the community room, server-side, right
