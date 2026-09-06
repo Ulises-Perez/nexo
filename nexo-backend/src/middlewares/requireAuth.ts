@@ -14,7 +14,7 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction): vo
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ error: 'Unauthorized: Missing or invalid token format' });
+        res.status(401).json({ error: 'Unauthorized: Missing or invalid token format', code: 'unauthorized' });
         return;
     }
 
@@ -28,6 +28,8 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction): vo
 
         next();
     } catch (error) {
-        res.status(403).json({ error: 'Forbidden: Invalid or expired token' });
+        // Missing, malformed, expired or invalid token: all are 401 (the
+        // client is simply not authenticated, not "forbidden").
+        res.status(401).json({ error: 'Unauthorized: Invalid or expired token', code: 'unauthorized' });
     }
 };

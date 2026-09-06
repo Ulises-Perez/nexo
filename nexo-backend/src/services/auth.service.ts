@@ -1,6 +1,12 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db/prisma';
+import { conflict, isPrismaError, unauthorized } from '../lib/errors';
+
+// Constant-time-ish decoy: hashed once at module load so a login attempt for
+// an unknown email still pays the same bcrypt.compare cost as a real one,
+// and the response timing does not reveal whether the account exists.
+const DUMMY_HASH = bcrypt.hashSync('nexo-dummy-password', 10);
 
 export class AuthService {
     private static readonly JWT_SECRET = process.env.JWT_SECRET;
@@ -21,69 +27,57 @@ export class AuthService {
         return tag;
     }
 
-    public static async register(data: { username: string; email: string; passwordHash: string; avatarUrl?: string }) {
-        // 1. Verificamos si el usuario ya existe
-        const existingUser = await prisma.user.findFirst({
-            where: {
-                OR: [{ email: data.email }, { username: data.username }],
-            },
-        });
-
-        if (existingUser) {
-            throw new Error('Email or Username already exists');
-        }
-
-        // 2. Hasheamos la password
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(data.passwordHash, salt);
-
-        // 3. Generamos un tag aleatorio
+    public static async register(data: { username: string; email: string; password: string; avatarUrl?: string }) {
+        const hashedPassword = await bcrypt.hash(data.password, 10);
         const tag = this.generateTag();
 
-        // 4. Creamos el usuario en la BD
-        const user = await prisma.user.create({
-            data: {
-                username: data.username,
-                tag,
-                email: data.email,
-                passwordHash: hashedPassword,
-                avatarUrl: data.avatarUrl,
-            },
-            select: {
-                id: true,
-                username: true,
-                tag: true,
-                email: true,
-                avatarUrl: true,
-                createdAt: true,
-            }
-        });
+        try {
+            const user = await prisma.user.create({
+                data: {
+                    username: data.username,
+                    tag,
+                    email: data.email,
+                    passwordHash: hashedPassword,
+                    avatarUrl: data.avatarUrl,
+                },
+                select: {
+                    id: true,
+                    username: true,
+                    tag: true,
+                    email: true,
+                    avatarUrl: true,
+                    createdAt: true,
+                },
+            });
 
-        return user;
+            return user;
+        } catch (err) {
+            if (isPrismaError(err, 'P2002')) {
+                throw conflict('Email or username already taken');
+            }
+            throw err;
+        }
     }
 
-    public static async login(email: string, passwordHash: string) {
-        // 1. Buscamos al usuario por correo electrónico
-        const user = await prisma.user.findUnique({
-            where: { email },
-        });
+    public static async login(email: string, password: string) {
+        const user = await prisma.user.findUnique({ where: { email } });
 
         if (!user) {
-            throw new Error('Invalid credentials');
+            // Unknown email: still run a bcrypt.compare against a decoy hash so
+            // the timing looks the same as a real "wrong password" attempt.
+            await bcrypt.compare(password, DUMMY_HASH);
+            throw unauthorized('Invalid credentials');
         }
 
-        // 2. Comparamos las contraseñas
-        const isValidPassword = await bcrypt.compare(passwordHash, user.passwordHash);
-
+        const isValidPassword = await bcrypt.compare(password, user.passwordHash);
         if (!isValidPassword) {
-            throw new Error('Invalid credentials');
+            throw unauthorized('Invalid credentials');
         }
 
-        // 3. Generamos el JWT
         const token = jwt.sign(
             { userId: user.id },
             this.getJwtSecret(),
-            { expiresIn: '7d' } // El token expira en 7 días
+            { expiresIn: '7d' }
         );
 
         return {
