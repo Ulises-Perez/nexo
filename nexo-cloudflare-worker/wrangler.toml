@@ -1,6 +1,6 @@
 name = "nexo-upload-worker"
 main = "src/index.ts"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-06-01"
 
 [[r2_buckets]]
 binding = "ASSETS"
@@ -9,3 +9,13 @@ bucket_name = "nexo-attachments"
 [vars]
 CDN_URL = "https://pub-be485944060140659115bf903d1bf6ca.r2.dev"
 WORKER_URL = "https://nexo-upload-worker.devk.workers.dev"
+
+# Required secret (never put it in [vars]):
+#   wrangler secret put UPLOAD_SECRET
+# The backend sends it as `Authorization: Bearer <UPLOAD_SECRET>` on
+# POST /api/upload/presign. Presign returns 503 until it is set.
+# Locally, put it in `.dev.vars` as `UPLOAD_SECRET=...`.
+#
+# Optional var: ALLOWED_ORIGINS = "https://example.com,https://other.example"
+# Comma-separated extra browser origins allowed to PUT uploads, on top of the
+# built-in Tauri/localhost defaults. Add it under [vars] only if needed.

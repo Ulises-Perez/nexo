@@ -11,11 +11,7 @@ const ALLOWED_MIME_TYPES = [
   'application/pdf',
   'application/zip',
   'text/plain',
-  'text/html',
-  'text/css',
-  'text/javascript',
-  'application/json',
-  'application/xml'
+  'application/json'
 ];
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB

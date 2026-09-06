@@ -22,7 +22,8 @@ export async function generatePresignedUrl(
   origin: string,
   objectKey: string,
   fileSize: number,
-  mimeType: string
+  mimeType: string,
+  userId: string
 ): Promise<PresignedUrlResponse> {
   // Generar token de upload
   const uploadToken = crypto.randomUUID();
@@ -33,6 +34,7 @@ export async function generatePresignedUrl(
     objectKey,
     fileSize,
     mimeType,
+    userId,
     expiresAt: expiresAt.toISOString()
   }));
 

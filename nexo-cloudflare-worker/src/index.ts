@@ -4,151 +4,206 @@ import { generateObjectKey, generatePresignedUrl } from './presign';
 interface Env {
   ASSETS: R2Bucket;
   CDN_URL: string;
+  // Shared secret the backend sends as `Authorization: Bearer <secret>` on
+  // presign requests. Set with `wrangler secret put UPLOAD_SECRET`.
+  UPLOAD_SECRET: string;
+  // Optional comma-separated list of extra browser origins allowed to PUT.
+  ALLOWED_ORIGINS?: string;
 }
 
-const RATE_LIMIT = 50; // requests per minute
-const DAILY_LIMIT = 500;
+const DEFAULT_ALLOWED_ORIGINS = [
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+  'http://localhost:1420',
+  'http://localhost:5173',
+];
 
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const MAX_USER_ID_LENGTH = 64;
 
-function checkRateLimit(userId: string): boolean {
-  const now = Date.now();
-  const userLimit = rateLimitMap.get(userId);
-
-  if (!userLimit || now > userLimit.resetAt) {
-    rateLimitMap.set(userId, { count: 1, resetAt: now + 60 * 1000 });
-    return true;
-  }
-
-  if (userLimit.count >= RATE_LIMIT) {
-    return false;
-  }
-
-  userLimit.count++;
-  return true;
+function allowedOrigins(env: Env): string[] {
+  const extra = (env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return [...DEFAULT_ALLOWED_ORIGINS, ...extra];
 }
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-User-ID',
+// Returns CORS headers only for allowlisted browser origins. Requests without
+// an Origin header (server-to-server) get no CORS headers at all.
+function corsHeadersFor(request: Request, env: Env): Headers {
+  const headers = new Headers();
+  const origin = request.headers.get('Origin');
+  if (!origin) return headers;
+
+  if (allowedOrigins(env).includes(origin)) {
+    headers.set('Access-Control-Allow-Origin', origin);
+    headers.set('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
+    headers.set('Access-Control-Allow-Headers', 'Content-Type');
+    headers.set('Vary', 'Origin');
+  }
+  return headers;
+}
+
+function isOriginAllowed(request: Request, env: Env): boolean {
+  const origin = request.headers.get('Origin');
+  if (!origin) return true;
+  return allowedOrigins(env).includes(origin);
+}
+
+function jsonResponse(body: unknown, status: number, cors: Headers): Response {
+  const headers = new Headers(cors);
+  headers.set('Content-Type', 'application/json');
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
+// Constant-time comparison of two strings via WebCrypto. `timingSafeEqual` is
+// a Workers extension not present in the DOM typings this project resolves,
+// hence the narrow cast.
+type SubtleWithTimingSafeEqual = SubtleCrypto & {
+  timingSafeEqual(a: ArrayBufferView, b: ArrayBufferView): boolean;
 };
 
+function secretsMatch(provided: string, expected: string): boolean {
+  const encoder = new TextEncoder();
+  const a = encoder.encode(provided);
+  const b = encoder.encode(expected);
+  if (a.byteLength !== b.byteLength) return false;
+  return (crypto.subtle as SubtleWithTimingSafeEqual).timingSafeEqual(a, b);
+}
+
 async function handlePresign(request: Request, env: Env): Promise<Response> {
-  // Get user ID from header (set by auth middleware)
-  const userId = request.headers.get('X-User-ID');
-  if (!userId) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 401,
-      headers: corsHeaders
-    });
+  const cors = corsHeadersFor(request, env);
+
+  if (!env.UPLOAD_SECRET) {
+    return jsonResponse({ error: 'Upload service not configured' }, 503, cors);
   }
 
-  // Check rate limit
-  if (!checkRateLimit(userId)) {
-    return new Response(JSON.stringify({
-      error: 'Rate limit exceeded. Try again in a minute.'
-    }), { status: 429, headers: corsHeaders });
+  const authHeader = request.headers.get('Authorization') ?? '';
+  const [scheme, token] = authHeader.split(' ');
+  if (scheme !== 'Bearer' || !token || !secretsMatch(token, env.UPLOAD_SECRET)) {
+    return jsonResponse({ error: 'Unauthorized' }, 401, cors);
   }
 
-  const body = await request.json();
-  const { fileName, fileSize, mimeType } = body;
-
-  // Validate input
-  if (!fileName || typeof fileSize !== 'number' || !mimeType) {
-    return new Response(JSON.stringify({ error: 'Missing required fields' }), {
-      status: 400,
-      headers: corsHeaders
-    });
+  let body: { userId?: unknown; fileName?: unknown; fileSize?: unknown; mimeType?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, cors);
   }
 
-  // Validate file
+  const { userId, fileName, fileSize, mimeType } = body;
+
+  if (typeof userId !== 'string' || userId.length === 0 || userId.length > MAX_USER_ID_LENGTH) {
+    return jsonResponse({ error: 'Invalid userId' }, 400, cors);
+  }
+
+  if (typeof fileName !== 'string' || !fileName || typeof fileSize !== 'number' || typeof mimeType !== 'string' || !mimeType) {
+    return jsonResponse({ error: 'Missing required fields' }, 400, cors);
+  }
+
   const validation = validateFile(fileName, fileSize, mimeType);
   if (!validation.valid) {
-    return new Response(JSON.stringify({ error: validation.error }), {
-      status: 400,
-      headers: corsHeaders
-    });
+    return jsonResponse({ error: validation.error }, 400, cors);
   }
 
-  // Generate object key
   const objectKey = generateObjectKey(fileName);
-
-  // Generate presigned URL
   const origin = new URL(request.url).origin;
-  const presigned = await generatePresignedUrl(env, origin, objectKey, fileSize, mimeType);
+  const presigned = await generatePresignedUrl(env, origin, objectKey, fileSize, mimeType, userId);
 
-  return new Response(JSON.stringify({
-    ...presigned,
-    type: validation.type
-  }), { status: 200, headers: corsHeaders });
+  return jsonResponse({ ...presigned, type: validation.type }, 200, cors);
+}
+
+function isInlineMime(mimeType: string): boolean {
+  return mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/');
 }
 
 async function handleUpload(request: Request, env: Env): Promise<Response> {
+  const cors = corsHeadersFor(request, env);
   const url = new URL(request.url);
   const token = url.pathname.split('/').pop();
 
-  // Get upload metadata from R2
   const metadataKey = `upload:${token}`;
   const metadataValue = await env.ASSETS.get(metadataKey);
 
   if (!metadataValue) {
-    return new Response(JSON.stringify({ error: 'Invalid or expired upload token' }), {
-      status: 400,
-      headers: corsHeaders
-    });
+    return jsonResponse({ error: 'Invalid or expired upload token' }, 400, cors);
   }
 
-  const metadata = JSON.parse(await metadataValue.text());
+  const metadata = JSON.parse(await metadataValue.text()) as {
+    objectKey: string;
+    fileSize: number;
+    mimeType: string;
+    userId?: string;
+    expiresAt: string;
+  };
 
-  // Check if expired
   if (new Date(metadata.expiresAt) < new Date()) {
     await env.ASSETS.delete(metadataKey);
-    return new Response(JSON.stringify({ error: 'Upload token expired' }), {
-      status: 400,
-      headers: corsHeaders
-    });
+    return jsonResponse({ error: 'Upload token expired' }, 400, cors);
   }
 
-  // Get the file from request
-  const fileData = await request.arrayBuffer();
-
-  // Verify size matches
-  if (fileData.byteLength !== metadata.fileSize) {
-    return new Response(JSON.stringify({ error: 'File size mismatch' }), {
-      status: 400,
-      headers: corsHeaders
-    });
+  // Validate declared length and type before touching the body so an
+  // oversized or mistyped request is rejected without buffering anything.
+  const contentLength = Number.parseInt(request.headers.get('Content-Length') ?? '', 10);
+  if (!Number.isInteger(contentLength) || contentLength !== metadata.fileSize) {
+    return jsonResponse({ error: 'File size mismatch' }, 400, cors);
   }
 
-  // Upload to R2
-  await env.ASSETS.put(metadata.objectKey, fileData, {
-    httpMetadata: {
-      contentType: metadata.mimeType
-    }
-  });
+  const contentType = request.headers.get('Content-Type');
+  if (contentType !== metadata.mimeType) {
+    return jsonResponse({ error: 'Content type mismatch' }, 400, cors);
+  }
 
-  // Delete the upload token
+  if (!request.body) {
+    return jsonResponse({ error: 'Missing request body' }, 400, cors);
+  }
+
+  try {
+    // Stream straight into R2; Content-Length gives R2 the known size it needs.
+    await env.ASSETS.put(metadata.objectKey, request.body, {
+      httpMetadata: {
+        contentType: metadata.mimeType,
+        contentDisposition: isInlineMime(metadata.mimeType) ? undefined : 'attachment',
+      },
+      customMetadata: {
+        userId: metadata.userId ?? '',
+        uploadedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('[upload] R2 put failed', error);
+    return jsonResponse({ error: 'Upload failed' }, 500, cors);
+  }
+
   await env.ASSETS.delete(metadataKey);
 
-  return new Response(JSON.stringify({ success: true }), {
-    status: 200,
-    headers: corsHeaders
-  });
+  return jsonResponse({ success: true }, 200, cors);
 }
+
+const LOCAL_HOSTS = ['localhost', '127.0.0.1'];
 
 // Serves an object straight from R2 — only reachable in local dev, where
 // env.CDN_URL's public bucket domain can't see the locally-simulated R2
 // storage a local upload actually lands in (see generatePresignedUrl).
 async function handleCdnServe(request: Request, env: Env): Promise<Response> {
-  const objectKey = new URL(request.url).pathname.replace('/api/upload/cdn/', '');
-  const object = await env.ASSETS.get(objectKey);
+  const cors = corsHeadersFor(request, env);
+  const url = new URL(request.url);
 
-  if (!object) {
-    return new Response('Not Found', { status: 404, headers: corsHeaders });
+  if (!LOCAL_HOSTS.includes(url.hostname)) {
+    return new Response('Not Found', { status: 404, headers: cors });
   }
 
-  const headers = new Headers(corsHeaders);
+  const objectKey = url.pathname.replace('/api/upload/cdn/', '');
+  if (!objectKey.startsWith('attachments/')) {
+    return new Response('Not Found', { status: 404, headers: cors });
+  }
+
+  const object = await env.ASSETS.get(objectKey);
+  if (!object) {
+    return new Response('Not Found', { status: 404, headers: cors });
+  }
+
+  const headers = new Headers(cors);
   object.writeHttpMetadata(headers);
   headers.set('etag', object.httpEtag);
 
@@ -159,12 +214,13 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Handle CORS preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 200, headers: corsHeaders });
+      if (!isOriginAllowed(request, env)) {
+        return new Response(null, { status: 403 });
+      }
+      return new Response(null, { status: 204, headers: corsHeadersFor(request, env) });
     }
 
-    // Handle presign endpoint
     if (url.pathname === '/api/upload/presign' && request.method === 'POST') {
       return handlePresign(request, env);
     }
@@ -174,11 +230,10 @@ export default {
       return handleCdnServe(request, env);
     }
 
-    // Handle upload endpoint (PUT with token)
     if (url.pathname.startsWith('/api/upload/') && request.method === 'PUT') {
       return handleUpload(request, env);
     }
 
-    return new Response('Not Found', { status: 404, headers: corsHeaders });
+    return new Response('Not Found', { status: 404, headers: corsHeadersFor(request, env) });
   }
 };
