@@ -1,29 +1,36 @@
 <template>
-  <div v-if="show && category" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-    <div class="bg-[#313338] rounded-xl shadow-2xl w-[720px] h-[440px] flex overflow-hidden animate-fade-in-up">
+  <BaseModal
+    :show="show && !!category"
+    width="720px"
+    panel-class="bg-[#313338] rounded-xl flex h-[440px]"
+    @close="$emit('close')"
+  >
+    <template #header="{ titleId }">
+      <h2 :id="titleId" class="sr-only">Configuración de categoría — {{ category?.name }}</h2>
+    </template>
 
-      <!-- Tab nav -->
-      <nav class="w-[200px] bg-[#2B2D31] p-4 flex flex-col gap-1 flex-shrink-0">
-        <p class="text-[11px] font-bold text-gray-500 uppercase tracking-widest px-2 mb-1 truncate">{{ category.name }}</p>
-        <button class="text-left px-3 py-2 rounded-lg text-sm font-medium bg-[#404249] text-white">
-          General
-        </button>
-      </nav>
+    <!-- Tab nav -->
+    <nav class="w-[200px] bg-[#2B2D31] p-4 flex flex-col gap-1 flex-shrink-0">
+      <p class="text-[11px] font-bold text-gray-500 uppercase tracking-widest px-2 mb-1 truncate">{{ category?.name }}</p>
+      <button class="text-left px-3 py-2 rounded-lg text-sm font-medium bg-[#404249] text-white">
+        General
+      </button>
+    </nav>
 
-      <!-- Content -->
-      <div class="flex-1 flex flex-col overflow-hidden relative">
-        <button
-          @click="$emit('close')"
-          class="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-black/20 hover:bg-black/40 text-gray-300 transition-colors z-10"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-          </svg>
-        </button>
+    <!-- Content -->
+    <div class="flex-1 flex flex-col overflow-hidden relative">
+      <button
+        @click="$emit('close')"
+        class="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-black/20 hover:bg-black/40 text-gray-300 transition-colors z-10"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+          <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+        </svg>
+      </button>
 
-        <div class="flex-1 overflow-y-auto p-6 custom-scrollbar">
+      <div class="flex-1 overflow-y-auto p-6 custom-scrollbar">
           <h2 class="text-lg font-bold text-gray-100 mb-1">Información general</h2>
-          <p class="text-xs text-gray-500 mb-5">Categoría — {{ category.channels.length }} canal{{ category.channels.length !== 1 ? 'es' : '' }}</p>
+          <p class="text-xs text-gray-500 mb-5">Categoría — {{ category?.channels.length ?? 0 }} canal{{ (category?.channels.length ?? 0) !== 1 ? 'es' : '' }}</p>
 
           <div class="mb-6 max-w-md">
             <label class="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Nombre de la categoría</label>
@@ -57,14 +64,17 @@
           </div>
         </div>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 </template>
+
 
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { useCommunityStore } from '../stores/community';
 import type { Category } from '../stores/community';
+import BaseModal from './ui/BaseModal.vue';
+import { dialog } from '../composables/useDialog';
+import { toast } from '../composables/useToast';
 
 const props = defineProps<{
   show: boolean;
@@ -95,20 +105,24 @@ const handleSave = async () => {
   if (success) {
     emit('close');
   } else {
-    alert('Hubo un error al guardar la categoría.');
+    toast.error('Hubo un error al guardar la categoría.');
   }
 };
 
 const handleDelete = async () => {
   if (!props.category) return;
-  if (!confirm(`¿Eliminar la categoría "${props.category.name}" y TODOS sus canales definitivamente?`)) return;
+  const confirmed = await dialog.confirm({
+    message: `¿Eliminar la categoría "${props.category.name}" y TODOS sus canales definitivamente?`,
+    danger: true,
+  });
+  if (!confirmed) return;
   isDeleting.value = true;
   const success = await communityStore.deleteCategory(props.category.id);
   isDeleting.value = false;
   if (success) {
     emit('close');
   } else {
-    alert('Hubo un error al eliminar la categoría.');
+    toast.error('Hubo un error al eliminar la categoría.');
   }
 };
 </script>

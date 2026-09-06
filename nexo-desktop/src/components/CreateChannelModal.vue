@@ -1,10 +1,21 @@
 <template>
-  <div v-if="show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-    <div class="bg-[#313338] rounded-xl shadow-2xl w-[460px] flex flex-col overflow-hidden animate-fade-in-up">
-      <header class="p-6 pb-2">
-        <h2 class="text-xl font-bold text-gray-100">Crear canal</h2>
+  <BaseModal :show="show" width="460px" panel-class="bg-[#313338] rounded-xl flex flex-col" @close="$emit('cancel')">
+    <template #header="{ titleId, close }">
+      <header class="p-6 pb-2 relative">
+        <button
+          type="button"
+          @click="close"
+          aria-label="Cerrar"
+          class="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-black/20 hover:bg-black/40 text-gray-300 transition-colors"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+          </svg>
+        </button>
+        <h2 :id="titleId" class="text-xl font-bold text-gray-100">Crear canal</h2>
         <p v-if="categoryName" class="text-gray-400 text-[13px] mt-1">en {{ categoryName }}</p>
       </header>
+    </template>
 
       <form @submit.prevent="handleSubmit" class="px-6 flex flex-col">
         <!-- Tipo de canal -->
@@ -79,14 +90,15 @@
           </button>
         </footer>
       </form>
-    </div>
-  </div>
+  </BaseModal>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { useCommunityStore } from '../stores/community';
 import type { Category } from '../stores/community';
+import BaseModal from './ui/BaseModal.vue';
+import { toast } from '../composables/useToast';
 
 const props = defineProps<{
   show: boolean;
@@ -134,7 +146,7 @@ const handleSubmit = async () => {
   if (success) {
     emit('created');
   } else {
-    alert('Hubo un error al crear el canal.');
+    toast.error('Hubo un error al crear el canal.');
   }
 };
 </script>

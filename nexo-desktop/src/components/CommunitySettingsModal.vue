@@ -1,32 +1,43 @@
 <template>
-  <div v-if="show && community" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-    <div class="bg-[#313338] rounded-xl shadow-2xl w-[860px] h-[600px] flex overflow-hidden animate-fade-in-up">
+  <BaseModal
+    :show="show && !!community"
+    width="860px"
+    panel-class="bg-[#313338] rounded-xl flex h-[600px]"
+    @close="$emit('close')"
+  >
+    <template #header="{ titleId }">
+      <h2 :id="titleId" class="sr-only">Configuración de servidor — {{ community?.name }}</h2>
+    </template>
 
-      <!-- Tab nav -->
-      <nav class="w-[200px] bg-[#2B2D31] p-4 flex flex-col gap-1 flex-shrink-0">
-        <p class="text-[11px] font-bold text-gray-500 uppercase tracking-widest px-2 mb-1 truncate">{{ community.name }}</p>
-        <button
-          v-for="tab in visibleTabs"
-          :key="tab.key"
-          @click="selectTab(tab.key)"
-          class="text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors"
-          :class="activeTab === tab.key ? 'bg-[#404249] text-white' : 'text-gray-400 hover:bg-[#35373C] hover:text-gray-200'"
-        >
-          {{ tab.label }}
-        </button>
-      </nav>
+    <!-- Tab nav -->
+    <nav class="w-[200px] bg-[#2B2D31] p-4 flex flex-col gap-1 flex-shrink-0">
+      <p class="text-[11px] font-bold text-gray-500 uppercase tracking-widest px-2 mb-1 truncate">{{ community?.name }}</p>
+      <button
+        v-for="tab in visibleTabs"
+        :key="tab.key"
+        @click="selectTab(tab.key)"
+        class="text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors"
+        :class="activeTab === tab.key ? 'bg-[#404249] text-white' : 'text-gray-400 hover:bg-[#35373C] hover:text-gray-200'"
+      >
+        {{ tab.label }}
+      </button>
+    </nav>
 
-      <!-- Content -->
-      <div class="flex-1 flex flex-col overflow-hidden relative">
-        <button
-          @click="$emit('close')"
-          class="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-black/20 hover:bg-black/40 text-gray-300 transition-colors z-10"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-          </svg>
-        </button>
+    <!-- Content -->
+    <div class="flex-1 flex flex-col overflow-hidden relative">
+      <button
+        @click="$emit('close')"
+        class="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-black/20 hover:bg-black/40 text-gray-300 transition-colors z-10"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+          <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+        </svg>
+      </button>
 
+      <!-- `community` is non-null whenever this modal is actually shown (BaseModal's
+           :show is `show && !!community`); this template v-if restores that
+           narrowing for vue-tsc inside the default slot's own render scope. -->
+      <template v-if="community">
         <!-- ==================== GENERAL ==================== -->
         <div v-if="activeTab === 'general'" class="flex-1 overflow-y-auto p-6 custom-scrollbar">
           <h2 class="text-lg font-bold text-gray-100 mb-5">Información general</h2>
@@ -306,9 +317,9 @@
             </div>
           </div>
         </div>
-      </div>
+      </template>
     </div>
-  </div>
+  </BaseModal>
 </template>
 
 <script setup lang="ts">
@@ -317,6 +328,9 @@ import { useAuthStore } from '../stores/auth';
 import { useCommunityStore, Permissions } from '../stores/community';
 import type { Community, Role, CommunityMember, CommunityBan } from '../stores/community';
 import UserAvatar from './UserAvatar.vue';
+import BaseModal from './ui/BaseModal.vue';
+import { dialog } from '../composables/useDialog';
+import { toast } from '../composables/useToast';
 
 const props = defineProps<{
   show: boolean;
@@ -410,17 +424,21 @@ const saveGeneral = async () => {
     iconUrl: generalForm.value.iconUrl
   });
   isSavingGeneral.value = false;
-  if (!success) alert('Hubo un error al guardar los cambios.');
+  if (!success) toast.error('Hubo un error al guardar los cambios.');
 };
 
 const handleDeleteCommunity = async () => {
   if (!props.community) return;
-  if (!confirm(`¿Eliminar "${props.community.name}" definitivamente? Esta acción no se puede deshacer.`)) return;
+  const confirmed = await dialog.confirm({
+    message: `¿Eliminar "${props.community.name}" definitivamente? Esta acción no se puede deshacer.`,
+    danger: true,
+  });
+  if (!confirmed) return;
   const success = await communityStore.deleteCommunity(props.community.id);
   if (success) {
     emit('close');
   } else {
-    alert('Hubo un error al eliminar el servidor.');
+    toast.error('Hubo un error al eliminar el servidor.');
   }
 };
 
@@ -467,18 +485,22 @@ const saveRole = async () => {
   }
 
   isSavingRole.value = false;
-  if (!success) alert('Hubo un error al guardar el rol.');
+  if (!success) toast.error('Hubo un error al guardar el rol.');
 };
 
 const handleDeleteRole = async () => {
   if (!props.community || !selectedRoleId.value) return;
-  if (!confirm('¿Eliminar este rol? Se quitará de todos los miembros que lo tengan.')) return;
+  const confirmed = await dialog.confirm({
+    message: '¿Eliminar este rol? Se quitará de todos los miembros que lo tengan.',
+    danger: true,
+  });
+  if (!confirmed) return;
   const success = await communityStore.deleteRole(props.community.id, selectedRoleId.value);
   if (success) {
     selectedRoleId.value = null;
     roleForm.value = null;
   } else {
-    alert('Hubo un error al eliminar el rol.');
+    toast.error('Hubo un error al eliminar el rol.');
   }
 };
 
@@ -512,41 +534,50 @@ const toggleMemberRole = async (member: CommunityMember, roleId: string) => {
   if (success) {
     await loadMembers();
   } else {
-    alert('Hubo un error al actualizar los roles del miembro.');
+    toast.error('Hubo un error al actualizar los roles del miembro.');
   }
 };
 
 const handleKick = async (member: CommunityMember) => {
   if (!props.community) return;
-  if (!confirm(`¿Expulsar a ${member.user.username} del servidor?`)) return;
+  const confirmed = await dialog.confirm({
+    message: `¿Expulsar a ${member.user.username} del servidor?`,
+    danger: true,
+  });
+  if (!confirmed) return;
   const success = await communityStore.kickMember(props.community.id, member.userId);
   if (success) {
     await loadMembers();
   } else {
-    alert('Hubo un error al expulsar al miembro.');
+    toast.error('Hubo un error al expulsar al miembro.');
   }
 };
 
 const handleBan = async (member: CommunityMember) => {
   if (!props.community) return;
-  const reason = prompt(`¿Banear a ${member.user.username}? Escribe un motivo (opcional):`);
+  const reason = await dialog.prompt({
+    message: `¿Banear a ${member.user.username}? Escribe un motivo (opcional):`,
+  });
   if (reason === null) return;
   const success = await communityStore.banMember(props.community.id, member.userId, reason);
   if (success) {
     await loadMembers();
   } else {
-    alert('Hubo un error al banear al miembro.');
+    toast.error('Hubo un error al banear al miembro.');
   }
 };
 
 const handleUnban = async (ban: CommunityBan) => {
   if (!props.community) return;
-  if (!confirm(`¿Quitar el baneo a ${ban.user.username}?`)) return;
+  const confirmed = await dialog.confirm({
+    message: `¿Quitar el baneo a ${ban.user.username}?`,
+  });
+  if (!confirmed) return;
   const success = await communityStore.unbanMember(props.community.id, ban.userId);
   if (success) {
     await loadBans();
   } else {
-    alert('Hubo un error al quitar el baneo.');
+    toast.error('Hubo un error al quitar el baneo.');
   }
 };
 </script>

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import type { Socket } from 'socket.io-client';
 import { hydrateCache, persistCache, VOICE_USER_AUDIO_CACHE_KEY } from '../composables/persistedCache';
+import { dialog } from '../composables/useDialog';
 
 export interface VoiceParticipant {
     socketId: string;
@@ -434,7 +435,7 @@ export const useVoiceStore = defineStore('voice', () => {
             const estabaEnVoz = !!connectedChannelId.value || isConnecting.value;
             tearDownVoice({ notifyServer: false });
             if (estabaEnVoz) {
-                alert('Te uniste a voz desde otro dispositivo. Esta sesión se desconectó de la llamada.');
+                void dialog.alert({ message: 'Te uniste a voz desde otro dispositivo. Esta sesión se desconectó de la llamada.' });
             }
         });
 
@@ -561,7 +562,7 @@ export const useVoiceStore = defineStore('voice', () => {
         // "wasConnected" de leaveVoice no suena — hay que reproducirlo a mano
         // para que se note audiblemente que la llamada terminó.
         playLeaveSound();
-        alert(mensaje);
+        void dialog.alert({ message: mensaje });
     };
 
     const esperar = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
