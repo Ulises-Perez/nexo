@@ -359,6 +359,43 @@ export const useCommunityStore = defineStore('community', () => {
         }
     };
 
+    // ===================== Invitaciones =====================
+
+    interface InviteInfo {
+        id: string;
+        name: string;
+        iconUrl: string | null;
+        _count: {
+            members: number;
+        };
+    }
+
+    const fetchInviteInfo = async (code: string): Promise<{ ok: true; info: InviteInfo } | { ok: false; error: string }> => {
+        try {
+            const response = await api.get(`/invites/${code}`);
+            if (response.status === 200) {
+                return { ok: true, info: response.data };
+            }
+            return { ok: false, error: response.data?.error || 'Esta invitación es inválida o expiró.' };
+        } catch (error: any) {
+            console.error(error);
+            return { ok: false, error: error.response?.data?.error || 'Error de conexión con el servidor.' };
+        }
+    };
+
+    const joinByInvite = async (code: string): Promise<{ ok: boolean; communityId?: string; error?: string }> => {
+        try {
+            const response = await api.post(`/invites/${code}/join`);
+            if (response.status === 200) {
+                return { ok: true, communityId: response.data.communityId };
+            }
+            return { ok: false, error: response.data?.error || 'No pudimos unirte a la comunidad.' };
+        } catch (error: any) {
+            console.error(error);
+            return { ok: false, error: error.response?.data?.error || 'Error de conexión con el servidor. Intenta nuevamente.' };
+        }
+    };
+
     // ===================== Miembros y moderación =====================
 
     const fetchMembers = async (communityId: string): Promise<CommunityMember[]> => {
@@ -575,6 +612,8 @@ export const useCommunityStore = defineStore('community', () => {
         setActiveCommunity,
         setActiveChannel,
         generateInviteCode,
+        fetchInviteInfo,
+        joinByInvite,
         leaveCommunity,
         removeCommunityLocally,
         createCommunity,

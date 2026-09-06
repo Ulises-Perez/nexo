@@ -1,25 +1,27 @@
 <template>
-  <div
-    v-if="profileStore.isOpen"
-    class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
-    @click="profileStore.close()"
+  <BaseModal
+    :show="profileStore.isOpen"
+    width="780px"
+    panel-class="max-w-[94vw] min-h-[520px] max-h-[88vh] bg-[#1e1f23] rounded-[20px] border border-white/[0.06] shadow-2xl shadow-black/80 flex relative"
+    backdrop-class="bg-black/50 z-[60]"
+    @close="profileStore.close()"
   >
-    <div
-      class="relative w-[780px] max-w-[94vw] min-h-[520px] max-h-[88vh] bg-[#1e1f23] rounded-[20px] border border-white/[0.06] shadow-2xl shadow-black/80 overflow-hidden flex"
-      @click.stop
-    >
-      <!-- Cerrar -->
-      <button
-        @click="profileStore.close()"
-        class="absolute top-3.5 right-3.5 z-30 w-8 h-8 flex items-center justify-center rounded-full bg-black/30 hover:bg-black/50 text-white transition-colors shadow-lg"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-          <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-        </svg>
-      </button>
+    <template #header="{ titleId }">
+      <h2 :id="titleId" class="sr-only">Perfil de usuario{{ user ? ' — ' + user.username : '' }}</h2>
+    </template>
 
-      <!-- Loading: skeleton shaped like the real two-column layout, so the modal
-           doesn't jump in size once data arrives. -->
+    <!-- Cerrar -->
+    <button
+      @click="profileStore.close()"
+      class="absolute top-3.5 right-3.5 z-30 w-8 h-8 flex items-center justify-center rounded-full bg-black/30 hover:bg-black/50 text-white transition-colors shadow-lg"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+        <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+      </svg>
+    </button>
+
+    <!-- Loading: skeleton shaped like the real two-column layout, so the modal
+         doesn't jump in size once data arrives. -->
       <div v-if="isLoading" class="flex w-full animate-pulse">
         <div class="w-[340px] flex-shrink-0 flex flex-col border-r border-white/[0.06]">
           <div class="h-28 bg-white/[0.04]"></div>
@@ -392,8 +394,7 @@
           </div>
         </div>
       </template>
-    </div>
-  </div>
+  </BaseModal>
 </template>
 
 <script setup lang="ts">
@@ -404,13 +405,16 @@ import { useFriendsStore } from '../stores/friends';
 import { useAuthStore } from '../stores/auth';
 import { useChatStore } from '../stores/chat';
 import { useUserSettingsStore } from '../stores/userSettings';
+import { useUsersStore } from '../stores/users';
 import { useUserBanner } from '../composables/useUserBanner';
 import { useReadableAccent } from '../composables/useReadableAccent';
 import { platformLabel, platformIcon } from '../composables/usePlatformIcon';
 import type { CommunityMember, Role } from '../stores/community';
 import type { UserConnection } from '../stores/auth';
 import UserAvatar from './UserAvatar.vue';
-import api from '../api/axios';
+import BaseModal from './ui/BaseModal.vue';
+import { dialog } from '../composables/useDialog';
+import { toast } from '../composables/useToast';
 
 interface ProfileUser {
   id: string;
@@ -450,6 +454,7 @@ const friendsStore = useFriendsStore();
 const authStore = useAuthStore();
 const chatStore = useChatStore();
 const userSettingsStore = useUserSettingsStore();
+const usersStore = useUsersStore();
 
 const user = ref<ProfileUser | null>(null);
 const member = ref<CommunityMember | null>(null);
@@ -610,12 +615,12 @@ const load = async () => {
   }
 
   try {
-    const [userResponse, status] = await Promise.all([
-      api.get(`/users/${requestedId}`),
+    const [userData, status] = await Promise.all([
+      usersStore.fetchProfile(requestedId),
       friendsStore.getFriendStatus(requestedId),
     ]);
     if (loadedUserId.value !== requestedId) return; // se reabrió para otro usuario mientras tanto
-    user.value = userResponse.data;
+    user.value = userData;
     friendStatus.value = status.status as FriendStatus;
     friendRequestId.value = status.requestId ?? '';
   } catch (error) {
@@ -628,13 +633,13 @@ const load = async () => {
 const loadMutuals = async (requestedId: string) => {
   isMutualsLoading.value = true;
   try {
-    const [friendsRes, communitiesRes] = await Promise.all([
-      api.get(`/users/${requestedId}/mutual-friends`),
-      api.get(`/users/${requestedId}/mutual-communities`),
+    const [friendsData, communitiesData] = await Promise.all([
+      usersStore.fetchMutualFriends(requestedId),
+      usersStore.fetchMutualCommunities(requestedId),
     ]);
     if (loadedUserId.value !== requestedId) return;
-    mutualFriends.value = friendsRes.data ?? [];
-    mutualCommunities.value = communitiesRes.data ?? [];
+    mutualFriends.value = friendsData ?? [];
+    mutualCommunities.value = communitiesData ?? [];
   } catch (error) {
     console.error('Error cargando datos en común:', error);
   } finally {
@@ -674,29 +679,34 @@ const sendMessage = async () => {
 };
 
 const handleFriendAction = async () => {
-  if (!user.value) return;
+  const target = user.value;
+  if (!target) return;
 
   if (friendStatus.value === 'none') {
-    const result = await friendsStore.sendFriendRequest(user.value.id);
+    const result = await friendsStore.sendFriendRequest(target.id);
     if (result.success) {
       friendStatus.value = 'pending_sent';
     } else {
-      alert(result.error);
+      toast.error(result.error);
     }
   } else if (friendStatus.value === 'pending_received' && friendRequestId.value) {
     const result = await friendsStore.acceptRequest(friendRequestId.value);
     if (result.success) {
       friendStatus.value = 'friends';
     } else {
-      alert(result.error);
+      toast.error(result.error);
     }
   } else if (friendStatus.value === 'friends') {
-    if (!confirm(`¿Eliminar a ${user.value.username} de tus amigos?`)) return;
-    const result = await friendsStore.removeFriend(user.value.id);
+    const confirmed = await dialog.confirm({
+      message: `¿Eliminar a ${target.username} de tus amigos?`,
+      danger: true,
+    });
+    if (!confirmed) return;
+    const result = await friendsStore.removeFriend(target.id);
     if (result.success) {
       friendStatus.value = 'none';
     } else {
-      alert(result.error);
+      toast.error(result.error);
     }
   }
 };
@@ -706,7 +716,7 @@ const setRoles = async (roleIds: string[]) => {
   if (success) {
     await loadMember();
   } else {
-    alert('Hubo un error al actualizar los roles.');
+    toast.error('Hubo un error al actualizar los roles.');
   }
 };
 

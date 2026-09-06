@@ -38,7 +38,6 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
-import api from '../api/axios';
 
 const email = ref('');
 const password = ref('');
@@ -51,20 +50,12 @@ const authStore = useAuthStore();
 const handleLogin = async () => {
   error.value = '';
   loading.value = true;
-  try {
-    const response = await api.post('/auth/login', {
-      email: email.value,
-      password: password.value,
-    });
-    
-    authStore.setToken(response.data.token);
-    await authStore.fetchUser();
-    
+  const result = await authStore.login(email.value, password.value);
+  if (result.ok) {
     router.push('/dashboard');
-  } catch (err: any) {
-    error.value = err.response?.data?.error || 'Error al iniciar sesión';
-  } finally {
-    loading.value = false;
+  } else {
+    error.value = result.error;
   }
+  loading.value = false;
 };
 </script>

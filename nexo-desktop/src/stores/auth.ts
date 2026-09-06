@@ -63,5 +63,31 @@ export const useAuthStore = defineStore('auth', () => {
         }
     };
 
-    return { token, user, setToken, removeToken, fetchUser };
+    // Logs in, stores the token and hydrates `user` — exactly what
+    // Login.vue's handleLogin used to do inline.
+    const login = async (email: string, password: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+        try {
+            const response = await api.post('/auth/login', { email, password });
+            setToken(response.data.token);
+            await fetchUser();
+            return { ok: true };
+        } catch (error: any) {
+            return { ok: false, error: error.response?.data?.error || 'Error al iniciar sesión' };
+        }
+    };
+
+    // Registers then auto-logs in — same two-step flow Register.vue used to do inline.
+    const register = async (data: { username: string; email: string; password: string }): Promise<{ ok: true } | { ok: false; error: string }> => {
+        try {
+            await api.post('/auth/register', data);
+            const loginResponse = await api.post('/auth/login', { email: data.email, password: data.password });
+            setToken(loginResponse.data.token);
+            await fetchUser();
+            return { ok: true };
+        } catch (error: any) {
+            return { ok: false, error: error.response?.data?.error || 'Error al registrar usuario' };
+        }
+    };
+
+    return { token, user, setToken, removeToken, fetchUser, login, register };
 });

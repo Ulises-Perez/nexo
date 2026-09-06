@@ -3,6 +3,7 @@ import { useFriendsStore } from '../stores/friends';
 import { useCommunityStore } from '../stores/community';
 import { useVoiceStore } from '../stores/voice';
 import { useScreenShareStore } from '../stores/screenShare';
+import { useUsersStore } from '../stores/users';
 import { clearDMProfileCache } from './dmProfileCache';
 
 // Single place that wipes every per-user store so nothing from one account
@@ -21,5 +22,6 @@ export function resetSessionState(): void {
     useChatStore().reset();
     useFriendsStore().reset();
     useCommunityStore().reset();
+    useUsersStore().reset();
     clearDMProfileCache();
 }

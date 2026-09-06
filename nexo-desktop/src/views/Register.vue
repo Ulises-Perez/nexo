@@ -42,7 +42,6 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
-import api from '../api/axios';
 
 const username = ref('');
 const email = ref('');
@@ -56,27 +55,16 @@ const authStore = useAuthStore();
 const handleRegister = async () => {
   error.value = '';
   loading.value = true;
-  try {
-    await api.post('/auth/register', {
-      username: username.value,
-      email: email.value,
-      password: password.value, // Frontend envia 'password', Backend espera 'password'
-    });
-    
-    // Auto-login después de registro
-    const loginResponse = await api.post('/auth/login', {
-       email: email.value,
-       password: password.value,
-    });
-
-    authStore.setToken(loginResponse.data.token);
-    await authStore.fetchUser();
-    
+  const result = await authStore.register({
+    username: username.value,
+    email: email.value,
+    password: password.value,
+  });
+  if (result.ok) {
     router.push('/dashboard');
-  } catch (err: any) {
-    error.value = err.response?.data?.error || 'Error al registrar usuario';
-  } finally {
-    loading.value = false;
+  } else {
+    error.value = result.error;
   }
+  loading.value = false;
 };
 </script>

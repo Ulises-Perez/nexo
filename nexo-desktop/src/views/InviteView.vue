@@ -76,7 +76,6 @@ import { ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { useCommunityStore } from '../stores/community';
-import api from '../api/axios';
 
 interface InviteInfo {
     id: string;
@@ -103,20 +102,13 @@ const goToDashboard = () => {
 };
 
 const fetchInviteInfo = async () => {
-  try {
-    const response = await api.get(`/invites/${inviteCode}`);
-
-    if (response.status === 200) {
-        inviteInfo.value = response.data;
-    } else {
-        error.value = response.data?.error || 'Esta invitación es inválida o expiró.';
-    }
-  } catch (err: any) {
-      console.error(err);
-      error.value = err.response?.data?.error || 'Error de conexión con el servidor.';
-  } finally {
-      isLoading.value = false;
+  const result = await communityStore.fetchInviteInfo(inviteCode);
+  if (result.ok) {
+      inviteInfo.value = result.info;
+  } else {
+      error.value = result.error;
   }
+  isLoading.value = false;
 };
 
 const joinCommunity = async () => {
@@ -126,24 +118,17 @@ const joinCommunity = async () => {
   }
 
   isJoining.value = true;
-  
-  try {
-    const response = await api.post(`/invites/${inviteCode}/join`);
 
-    if (response.status === 200) {
-        if (response.data.communityId) {
-            // Dashboard.onMounted resets the active community before loading
-            // the list, so hand it over as a pending selection instead.
-            communityStore.pendingCommunityId = response.data.communityId;
-        }
-        router.push('/dashboard');
-    } else {
-        error.value = response.data?.error || 'No pudimos unirte a la comunidad.';
-        isJoining.value = false;
-    }
-  } catch (err: any) {
-      console.error(err);
-      error.value = err.response?.data?.error || 'Error de conexión con el servidor. Intenta nuevamente.';
+  const result = await communityStore.joinByInvite(inviteCode);
+  if (result.ok) {
+      if (result.communityId) {
+          // Dashboard.onMounted resets the active community before loading
+          // the list, so hand it over as a pending selection instead.
+          communityStore.pendingCommunityId = result.communityId;
+      }
+      router.push('/dashboard');
+  } else {
+      error.value = result.error || 'No pudimos unirte a la comunidad.';
       isJoining.value = false;
   }
 };
