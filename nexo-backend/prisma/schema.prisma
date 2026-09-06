@@ -101,6 +101,7 @@ model CommunityBan {
   community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
   user        User      @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
   @@unique([communityId, userId])
+  @@index([userId])
 }
 model Category {
   id          String    @id @default(uuid())
@@ -109,6 +110,7 @@ model Category {
   order       Int       @default(0)
   community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
   channels    Channel[]
+  @@index([communityId, order])
 }
 model Attachment {
   id        String   @id @default(uuid())
@@ -124,6 +126,8 @@ model Attachment {
   createdAt DateTime @default(now())
 
   message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
 }
 
 model Message {
@@ -196,4 +200,6 @@ model Channel {
   category    Category? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   messages    Message[]
   conversation Conversation?
+
+  @@index([categoryId, order])
 }
