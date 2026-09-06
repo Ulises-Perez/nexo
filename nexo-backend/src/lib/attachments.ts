@@ -80,12 +80,19 @@ export function getAllowedCdnPrefixes(): string[] {
     return prefixes;
 }
 
+export const MAX_OBJECT_KEY_LENGTH = 512;
+
 export interface AttachmentInput {
     name: string;
     size: number;
     mimeType: string;
     url: string;
     type: AttachmentType;
+    objectKey: string;
+}
+
+function isValidObjectKey(key: string): boolean {
+    return key.length > 0 && key.length <= MAX_OBJECT_KEY_LENGTH && key.startsWith('attachments/') && !key.includes('..');
 }
 
 export type AttachmentValidation =
@@ -97,7 +104,7 @@ export function validateAttachmentInput(att: unknown): AttachmentValidation {
     if (!att || typeof att !== 'object') {
         return { ok: false, error: 'attachment must be an object' };
     }
-    const { name, size, mimeType, cdnUrl, type } = att as Record<string, unknown>;
+    const { name, size, mimeType, cdnUrl, type, objectKey: rawObjectKey } = att as Record<string, unknown>;
 
     const file = validateFile(name, size, mimeType);
     if (!file.valid) {
@@ -108,7 +115,8 @@ export function validateAttachmentInput(att: unknown): AttachmentValidation {
         return { ok: false, error: 'invalid attachment url' };
     }
     const prefixes = getAllowedCdnPrefixes();
-    if (!prefixes.some(prefix => cdnUrl.startsWith(prefix))) {
+    const matchedPrefix = prefixes.find(prefix => cdnUrl.startsWith(prefix));
+    if (!matchedPrefix) {
         return { ok: false, error: 'attachment url is not from the configured CDN' };
     }
 
@@ -119,6 +127,24 @@ export function validateAttachmentInput(att: unknown): AttachmentValidation {
         return { ok: false, error: 'attachment type does not match its mime type' };
     }
 
+    // objectKey is optional from the client: older clients (or the CDN-only
+    // presign response) may not send it, in which case it's derived from the
+    // matched CDN prefix — the part of cdnUrl after the prefix IS the key
+    // (see nexo-cloudflare-worker/src/presign.ts).
+    let objectKey: string;
+    if (rawObjectKey !== undefined) {
+        if (typeof rawObjectKey !== 'string' || !isValidObjectKey(rawObjectKey)) {
+            return { ok: false, error: 'invalid attachment object key' };
+        }
+        objectKey = rawObjectKey;
+    } else {
+        const derived = cdnUrl.slice(matchedPrefix.length);
+        if (!isValidObjectKey(derived)) {
+            return { ok: false, error: 'could not derive attachment object key from url' };
+        }
+        objectKey = derived;
+    }
+
     return {
         ok: true,
         value: {
@@ -127,6 +153,7 @@ export function validateAttachmentInput(att: unknown): AttachmentValidation {
             mimeType: mimeType as string,
             url: cdnUrl,
             type: type as AttachmentType,
+            objectKey,
         },
     };
 }

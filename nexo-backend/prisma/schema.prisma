@@ -119,6 +119,7 @@ model Attachment {
   size      Int
   mimeType  String
   url       String
+  objectKey String?  // R2 key; nullable for legacy rows (derived from url at runtime)
   type      String   // 'image' | 'video' | 'audio' | 'file'
   width     Int?
   height    Int?

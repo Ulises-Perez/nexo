@@ -71,6 +71,81 @@ function secretsMatch(provided: string, expected: string): boolean {
   return (crypto.subtle as SubtleWithTimingSafeEqual).timingSafeEqual(a, b);
 }
 
+const MAX_DELETE_KEYS = 100;
+
+function isValidObjectKey(key: unknown): key is string {
+  return typeof key === 'string' && key.startsWith('attachments/') && !key.includes('..');
+}
+
+// POST /api/upload/delete — server-to-server only (the backend, after it
+// deletes the owning message/channel/category/community). No CORS headers:
+// browsers never call this endpoint directly.
+async function handleDeleteObjects(request: Request, env: Env): Promise<Response> {
+  const noCors = new Headers();
+
+  if (!env.UPLOAD_SECRET) {
+    return jsonResponse({ error: 'Upload service not configured' }, 503, noCors);
+  }
+
+  const authHeader = request.headers.get('Authorization') ?? '';
+  const [scheme, token] = authHeader.split(' ');
+  if (scheme !== 'Bearer' || !token || !secretsMatch(token, env.UPLOAD_SECRET)) {
+    return jsonResponse({ error: 'Unauthorized' }, 401, noCors);
+  }
+
+  let body: { keys?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, noCors);
+  }
+
+  const { keys } = body;
+  if (!Array.isArray(keys) || keys.length === 0 || keys.length > MAX_DELETE_KEYS || !keys.every(isValidObjectKey)) {
+    return jsonResponse({ error: `keys must be an array of 1-${MAX_DELETE_KEYS} valid object keys` }, 400, noCors);
+  }
+
+  await env.ASSETS.delete(keys);
+
+  return jsonResponse({ deleted: keys.length }, 200, noCors);
+}
+
+// Sweeps `upload:<token>` presign metadata whose 15-minute window has passed
+// without the client ever completing the PUT — otherwise those tiny JSON
+// objects accumulate in R2 forever. Runs on the cron in wrangler.toml.
+async function purgeExpiredUploadMetadata(env: Env): Promise<number> {
+  let cursor: string | undefined;
+  let deletedCount = 0;
+
+  do {
+    const listing: R2Objects = await env.ASSETS.list({ prefix: 'upload:', cursor });
+    const expiredKeys: string[] = [];
+
+    for (const obj of listing.objects) {
+      const value = await env.ASSETS.get(obj.key);
+      if (!value) continue;
+
+      try {
+        const metadata = JSON.parse(await value.text()) as { expiresAt?: string };
+        if (metadata.expiresAt && new Date(metadata.expiresAt) < new Date()) {
+          expiredKeys.push(obj.key);
+        }
+      } catch {
+        // Malformed metadata: leave it rather than guessing.
+      }
+    }
+
+    if (expiredKeys.length > 0) {
+      await env.ASSETS.delete(expiredKeys);
+      deletedCount += expiredKeys.length;
+    }
+
+    cursor = listing.truncated ? listing.cursor : undefined;
+  } while (cursor);
+
+  return deletedCount;
+}
+
 async function handlePresign(request: Request, env: Env): Promise<Response> {
   const cors = corsHeadersFor(request, env);
 
@@ -225,6 +300,10 @@ export default {
       return handlePresign(request, env);
     }
 
+    if (url.pathname === '/api/upload/delete' && request.method === 'POST') {
+      return handleDeleteObjects(request, env);
+    }
+
     // Serve an object directly (local dev only — see handleCdnServe)
     if (url.pathname.startsWith('/api/upload/cdn/') && request.method === 'GET') {
       return handleCdnServe(request, env);
@@ -235,5 +314,13 @@ export default {
     }
 
     return new Response('Not Found', { status: 404, headers: corsHeadersFor(request, env) });
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      purgeExpiredUploadMetadata(env).then(count => {
+        console.log(`[upload] scheduled cleanup: deleted ${count} expired upload token(s)`);
+      })
+    );
   }
 };

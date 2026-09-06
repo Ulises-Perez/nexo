@@ -6,6 +6,10 @@ compatibility_date = "2025-06-01"
 binding = "ASSETS"
 bucket_name = "nexo-attachments"
 
+[triggers]
+# Sweeps expired upload:<token> presign metadata daily at 04:00 UTC.
+crons = ["0 4 * * *"]
+
 [vars]
 CDN_URL = "https://pub-be485944060140659115bf903d1bf6ca.r2.dev"
 WORKER_URL = "https://nexo-upload-worker.devk.workers.dev"

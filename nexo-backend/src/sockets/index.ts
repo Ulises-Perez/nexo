@@ -3,6 +3,7 @@ import { socketAuth, AuthenticatedSocket } from '../middlewares/socketAuth';
 import { prisma } from '../db/prisma';
 import { Permissions, getMemberContext, hasPermission, getCommunityIdOfChannel, isUserMemberOfChannel } from '../lib/permissions';
 import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_MESSAGE_LENGTH, validateAttachmentInput, type AttachmentInput } from '../lib/attachments';
+import { collectAttachmentKeys, purgeAttachmentObjects } from '../lib/attachmentCleanup';
 import {
     addVoiceParticipant,
     removeVoiceParticipant,
@@ -387,6 +388,7 @@ export const setupSockets = (io: Server) => {
                                 size: att.size,
                                 mimeType: att.mimeType,
                                 url: att.url,
+                                objectKey: att.objectKey,
                                 type: att.type
                             }))
                         } : undefined
@@ -477,7 +479,9 @@ export const setupSockets = (io: Server) => {
                     if (!hasPermission(ctx, Permissions.MANAGE_MESSAGES)) return;
                 }
 
+                const keys = await collectAttachmentKeys({ messageId });
                 await prisma.message.delete({ where: { id: messageId } });
+                purgeAttachmentObjects(keys);
                 await emitToChannelMembers(io, message.channelId, 'message_deleted', { messageId, channelId: message.channelId });
             } catch (error) {
                 console.error('[Socket.io] Error eliminando mensaje:', error);
