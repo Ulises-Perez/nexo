@@ -6,7 +6,9 @@ import { useFriendsStore } from './friends';
 import { useCommunityStore } from './community';
 import { useVoiceStore } from './voice';
 import api from '../api/axios';
-import { hydrateCache, persistCache, MESSAGE_CACHE_KEY } from '../composables/persistedCache';
+import router from '../router';
+import { hydrateCache, persistCache, clearPersistedCache, MESSAGE_CACHE_KEY } from '../composables/persistedCache';
+import { resetSessionState } from '../composables/useSessionReset';
 
 export interface MessageAttachment {
     id: string;
@@ -86,7 +88,6 @@ export interface DMConversation {
 
 // Environment-based URLs
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:4000';
-const UPLOAD_URL = import.meta.env.VITE_UPLOAD_URL || 'https://nexo-upload-worker.devk.workers.dev';
 
 export const useChatStore = defineStore('chat', () => {
     const socket = ref<Socket | null>(null);
@@ -155,14 +156,39 @@ export const useChatStore = defineStore('chat', () => {
     // como fallido) el eco local cuando llega el ack o el evento new_message.
     const pendingSends = new Map<string, { channelId: string }>();
 
-    // Une dos listas de mensajes deduplicando por id y ordenando por createdAt asc.
+    // Merges two message lists that are each already sorted ascending by
+    // createdAt (the server returns pages that way and the cache keeps that
+    // invariant) into one ascending list, deduplicating by id. When both lists
+    // carry the same id the entry from `b` wins. Linear: each createdAt is
+    // parsed exactly once instead of twice per comparison inside a sort.
     const mergeById = (a: ChatMessage[], b: ChatMessage[]): ChatMessage[] => {
-        const byId = new Map<string, ChatMessage>();
-        for (const m of a) byId.set(m.id, m);
-        for (const m of b) byId.set(m.id, m);
-        return Array.from(byId.values()).sort(
-            (x, y) => new Date(x.createdAt).getTime() - new Date(y.createdAt).getTime()
-        );
+        if (a.length === 0) return b.slice();
+        if (b.length === 0) return a.slice();
+
+        const idsInB = new Set<string>();
+        for (const m of b) idsInB.add(m.id);
+
+        const timesA = a.map(m => Date.parse(m.createdAt));
+        const timesB = b.map(m => Date.parse(m.createdAt));
+
+        const out: ChatMessage[] = [];
+        let i = 0;
+        let j = 0;
+        while (i < a.length || j < b.length) {
+            if (i < a.length && idsInB.has(a[i].id)) {
+                // Superseded by the copy in `b`; it is emitted from there.
+                i++;
+                continue;
+            }
+            if (j >= b.length || (i < a.length && timesA[i] <= timesB[j])) {
+                out.push(a[i]);
+                i++;
+            } else {
+                out.push(b[j]);
+                j++;
+            }
+        }
+        return out;
     };
 
     // Un eco optimista en vuelo tiene id sintético (`pending-<nonce>`) que
@@ -241,8 +267,45 @@ export const useChatStore = defineStore('chat', () => {
         unreadCounts.value.set(friendId, 0);
     };
 
+    // Author profile patches (username/avatar from `user_updated`) are applied
+    // eagerly only to the ACTIVE channel's list. Every other cached list gets
+    // them lazily the next time it is served, so a profile change costs O(one
+    // list) instead of O(every cached message). `userPatchVersion` bumps on
+    // each patch; a channel whose recorded version is behind re-applies the
+    // latest patch of every user in one pass.
+    const pendingUserPatches = new Map<string, { username: string; avatarUrl: string | null }>();
+    let userPatchVersion = 0;
+    const channelPatchVersion = new Map<string, number>();
+
+    const applyUserPatchToList = (list: ChatMessage[], userId: string, patch: { username: string; avatarUrl: string | null }) => {
+        for (const m of list) {
+            if (m.userId === userId && m.user) {
+                m.user.username = patch.username;
+                m.user.avatarUrl = patch.avatarUrl;
+            }
+        }
+    };
+
+    const applyPendingUserPatches = (channelId: string, list: ChatMessage[]) => {
+        if ((channelPatchVersion.get(channelId) ?? 0) === userPatchVersion) return;
+        if (pendingUserPatches.size > 0) {
+            for (const m of list) {
+                if (!m.user) continue;
+                const patch = pendingUserPatches.get(m.userId);
+                if (patch) {
+                    m.user.username = patch.username;
+                    m.user.avatarUrl = patch.avatarUrl;
+                }
+            }
+        }
+        channelPatchVersion.set(channelId, userPatchVersion);
+    };
+
     // Apply a freshly-fetched message list to the cache and the DM preview.
     const applyFetchedMessages = (channelId: string, data: ChatMessage[]) => {
+        // Freshly fetched rows already carry current author data, and any
+        // older rows merged in were patched when the channel was served.
+        channelPatchVersion.set(channelId, userPatchVersion);
         touchCacheEntry(channelId, data);
 
         // Update last message preview from fetched messages (active DM only)
@@ -269,19 +332,18 @@ export const useChatStore = defineStore('chat', () => {
 
         if (cached) {
             // Cache hit: keep the entry warm and revalidate detached.
+            applyPendingUserPatches(channelId, cached);
             touchCacheEntry(channelId, cached);
             void revalidateMessages(channelId);
             return;
         }
 
-        console.log('[FETCH] Obteniendo mensajes para canal:', channelId);
         loadingChannels.value.add(channelId);
         try {
             // Página más reciente: el server ya devuelve orden ascendente.
             const response = await api.get(`/channels/${channelId}/messages?limit=${PAGE_SIZE}`);
-            console.log('[FETCH] Status:', response.status);
             const data = response.data as ChatMessage[];
-            console.log('[FETCH] Mensajes recibidos:', data.length, data);
+            if (import.meta.env.DEV) console.log('[FETCH] messages received:', channelId, data.length);
             // Re-leer el cache DESPUÉS del await: un envío optimista pudo haberse
             // agregado mientras esta primera página estaba en vuelo. Sin este merge,
             // el fetch reemplazaría el array entero y borraría ese eco.
@@ -373,41 +435,77 @@ export const useChatStore = defineStore('chat', () => {
             }
         });
 
+        // Scoped to this socket instance: a fresh connectSocket() call starts
+        // over, so the first 'connect' of a new instance is never a re-join.
+        let hasConnectedBefore = false;
+
         socket.value.on('connect', () => {
             console.log('🔗 Conectado al servidor de Sockets de Nexo', socket.value?.id);
+
+            if (hasConnectedBefore) {
+                // Every reconnection arrives with a brand-new socket id and the
+                // server only puts a socket in a channel room on 'join_channel'.
+                // Without re-joining, the open channel silently stops receiving
+                // new_message / user_typing / message_updated until the user
+                // switches channels. Revalidate to fill the gap missed offline
+                // and refresh DM conversations to recover unread counters.
+                const channelId = activeChannelId.value;
+                if (channelId && socket.value) {
+                    socket.value.emit('join_channel', channelId);
+                    void revalidateMessages(channelId);
+                }
+                void fetchDMConversations();
+            }
+            hasConnectedBefore = true;
         });
 
         socket.value.on('connect_error', (error) => {
             console.error('❌ Error de conexión al socket:', error.message);
+
+            // socket.io-client stops retrying (active === false) when the server
+            // middleware rejected the handshake, e.g. an expired or invalid JWT.
+            // Left alone the UI would look alive with nothing arriving in real
+            // time; treat it like a REST 401 and send the user back to login.
+            if (socket.value && !socket.value.active) {
+                resetSessionState();
+                useAuthStore().removeToken();
+                router.push('/login');
+            }
         });
 
         socket.value.on('new_message', (message: ChatMessage & { clientNonce?: string }) => {
-            console.log('[SOCKET] new_message recibido:', message);
+            if (import.meta.env.DEV) console.log('[SOCKET] new_message:', message.channelId, message.id);
             const authStore2 = useAuthStore();
 
             // Append to the channel's cache entry if we have one (active or not).
             // The computed `messages` reflects this for the active channel.
             const cached = messageCache.value.get(message.channelId);
 
-            if (message.clientNonce) {
-                // Propio envío confirmado: reemplazar el eco optimista por el
-                // mensaje real (in-place, para no mover su posición/scroll).
-                // Late acks que ya fallaron por timeout también se curan acá.
-                pendingSends.delete(message.clientNonce);
-                if (cached) {
-                    const i = cached.findIndex(m => m.id === `pending-${message.clientNonce}`);
-                    if (i !== -1) {
-                        if (cached.some(m => m.id === message.id)) cached.splice(i, 1);
-                        else cached.splice(i, 1, message);
-                    }
+            if (cached) {
+                // One scan resolves both questions: is the real id already
+                // present (redelivery), and where is the optimistic echo.
+                const pendingId = message.clientNonce ? `pending-${message.clientNonce}` : null;
+                let realIndex = -1;
+                let echoIndex = -1;
+                for (let k = 0; k < cached.length; k++) {
+                    const id = cached[k].id;
+                    if (id === message.id) realIndex = k;
+                    else if (pendingId !== null && id === pendingId) echoIndex = k;
+                    if (realIndex !== -1 && (pendingId === null || echoIndex !== -1)) break;
+                }
+
+                if (echoIndex !== -1) {
+                    // Own send confirmed: swap the optimistic echo for the real
+                    // message in place (keeps position/scroll). Late acks that
+                    // already failed by timeout are healed here too.
+                    if (realIndex !== -1) cached.splice(echoIndex, 1);
+                    else cached.splice(echoIndex, 1, message);
+                } else if (realIndex === -1) {
+                    // Guard by id so a redelivered event never duplicates.
+                    cached.push(message);
                 }
             }
-
-            // Guard by id so a redelivered event (or one already merged above)
-            // never duplicates a message.
-            if (cached && !cached.some(m => m.id === message.id)) {
-                cached.push(message);
-            }
+            if (message.clientNonce) pendingSends.delete(message.clientNonce);
 
             if (message.channelId === activeChannelId.value) {
                 // Update last message if this is the active DM
@@ -451,7 +549,6 @@ export const useChatStore = defineStore('chat', () => {
                         isResyncingConversations = false;
                     });
                 }
-                console.log('[SOCKET] Mensaje en canal no activo');
             }
         });
 
@@ -527,15 +624,16 @@ export const useChatStore = defineStore('chat', () => {
                 if ('customStatus' in u) target.customStatus = u.customStatus;
             };
 
-            // Autores de los mensajes cargados (en todos los canales cacheados)
-            messageCache.value.forEach(list => {
-                list.forEach(m => {
-                    if (m.userId === u.id && m.user) {
-                        m.user.username = u.username;
-                        m.user.avatarUrl = u.avatarUrl;
-                    }
-                });
-            });
+            // Message authors: patch the visible (active) list now; every
+            // other cached list is patched lazily when it is next served.
+            const patch = { username: u.username, avatarUrl: u.avatarUrl };
+            pendingUserPatches.set(u.id, patch);
+            userPatchVersion++;
+            const activeList = activeChannelId.value ? messageCache.value.get(activeChannelId.value) : undefined;
+            if (activeList) {
+                applyUserPatchToList(activeList, u.id, patch);
+                channelPatchVersion.set(activeChannelId.value, userPatchVersion);
+            }
 
             // Mi propio usuario (cambio hecho desde otra sesión)
             const authStore2 = useAuthStore();
@@ -750,17 +848,36 @@ export const useChatStore = defineStore('chat', () => {
     const handleCommunityRemoved = (communityId: string, notice: string) => {
         const communityStore = useCommunityStore();
         const wasActive = communityStore.activeCommunityId === communityId;
+        // Collect this community's channel ids BEFORE the store drops it.
+        const community = communityStore.communities.find(c => c.id === communityId);
+        const channelIds = community
+            ? community.categories.flatMap(cat => cat.channels.map(ch => ch.id))
+            : null;
         communityStore.removeCommunityLocally(communityId);
-        // Permission hygiene: drop all cached messages when leaving/losing a
-        // community so stale entries cannot leak after access is revoked.
-        // Persisted copy is wiped immediately (not debounced) so a pending
-        // write from before the clear can't resurrect it on next launch.
-        messageCache.value.clear();
+        // Permission hygiene: drop the cached messages of the channels that
+        // were just lost so stale entries cannot leak after access is revoked.
+        // DMs and other communities stay warm. If the community object was
+        // already gone (unknown channel set) fall back to a full clear.
+        if (channelIds) {
+            for (const id of channelIds) {
+                messageCache.value.delete(id);
+                hasMoreOlder.value.delete(id);
+                channelPatchVersion.delete(id);
+            }
+        } else {
+            messageCache.value.clear();
+        }
+        // Persisted copy is rewritten immediately (not debounced) so a pending
+        // write from before the removal can't resurrect it on next launch.
         if (persistMessagesTimer) {
             clearTimeout(persistMessagesTimer);
             persistMessagesTimer = null;
         }
-        persistCache(MESSAGE_CACHE_KEY, 2, []);
+        const entries: Array<[string, ChatMessage[]]> = [];
+        messageCache.value.forEach((msgs, id) => {
+            entries.push([id, msgs.filter(m => !m.pending && !m.failed).slice(-PAGE_SIZE)]);
+        });
+        persistCache(MESSAGE_CACHE_KEY, 2, entries);
         if (wasActive) {
             leaveChannel();
             alert(notice);
@@ -971,9 +1088,14 @@ export const useChatStore = defineStore('chat', () => {
         void fetchMessages(channelId);
     };
 
+    // Bumped on every openDM call. A cache-miss POST that resolves after a
+    // newer openDM (any friend) must not activate its now-stale DM on top.
+    let openDMSeq = 0;
+
     const openDM = async (friend: DMFriend) => {
         const authStore2 = useAuthStore();
         if (!authStore2.token) return;
+        const seq = ++openDMSeq;
 
         // Canal ya conocido (p. ej. un DM que ya está en el sidebar): activar
         // de inmediato sin esperar red. El POST igual se dispara en segundo
@@ -992,12 +1114,16 @@ export const useChatStore = defineStore('chat', () => {
             const response = await api.post(`/friends/dm/${friend.id}`);
             const data = response.data;
 
+            // The mapping is still valid knowledge even if the user moved on.
             dmChannels.value.set(friend.id, data.channelId);
             channelToFriend.value.set(data.channelId, friend.id);
 
             if (!conversations.value.some(c => c.channelId === data.channelId)) {
                 conversations.value.push({ channelId: data.channelId, friend });
             }
+
+            // Superseded by a newer openDM while this request was in flight.
+            if (seq !== openDMSeq) return;
 
             activateDM(friend, data.channelId);
         } catch (error: any) {
@@ -1073,28 +1199,23 @@ export const useChatStore = defineStore('chat', () => {
         pendingAttachments.value.push(attachment);
 
         try {
-            // Request presigned URL from upload worker
-            const authStore = useAuthStore();
-            const response = await fetch(`${UPLOAD_URL}/api/upload/presign`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-User-ID': authStore.user?.id ?? ''
-                },
-                body: JSON.stringify({
+            // The backend issues the presign (it validates, rate-limits and
+            // authenticates via JWT); the worker no longer trusts client headers.
+            let presign: { uploadUrl: string; objectKey: string; cdnUrl: string };
+            try {
+                const response = await api.post('/attachments/presign', {
                     fileName: file.name,
                     fileSize: file.size,
                     mimeType: file.type
-                })
-            });
-
-            if (!response.ok) {
-                const message = await response.json().then(body => body.error).catch(() => null);
-                updateAttachment(id, { status: 'error', error: message ?? 'Failed to get upload URL' });
-                throw new Error(message ?? 'Failed to get upload URL');
+                });
+                presign = response.data;
+            } catch (error: any) {
+                const message: string = error?.response?.data?.error ?? 'Failed to get upload URL';
+                updateAttachment(id, { status: 'error', error: message });
+                throw new Error(message);
             }
 
-            const { uploadUrl, objectKey, cdnUrl } = await response.json();
+            const { uploadUrl, objectKey, cdnUrl } = presign;
             updateAttachment(id, { uploadUrl, objectKey, cdnUrl, status: 'uploading' });
 
             // Upload file directly to presigned URL
@@ -1148,7 +1269,49 @@ export const useChatStore = defineStore('chat', () => {
         pendingAttachments.value = pendingAttachments.value.filter(a => a.status !== 'completed');
     }
 
+    // Wipe every piece of per-user state (memory and persisted) so nothing
+    // from one account survives into the next login on the same machine.
+    // Disconnects the socket first so no late event repopulates the maps.
+    const reset = () => {
+        disconnectSocket();
+
+        clearTyping();
+        if (persistMessagesTimer) {
+            clearTimeout(persistMessagesTimer);
+            persistMessagesTimer = null;
+        }
+        pendingSends.clear();
+        loadingOlder.clear();
+        isResyncingConversations = false;
+        lastTypingEmit = 0;
+
+        messageCache.value.clear();
+        hasMoreOlder.value.clear();
+        loadingChannels.value.clear();
+        pendingUserPatches.clear();
+        channelPatchVersion.clear();
+        userPatchVersion = 0;
+        conversations.value = [];
+        dmChannels.value.clear();
+        channelToFriend.value.clear();
+        unreadCounts.value.clear();
+        lastMessages.value.clear();
+
+        activeChannelId.value = '';
+        activeDMUser.value = null;
+        shouldShowFriends.value = false;
+        homeView.value = 'friends';
+
+        for (const a of pendingAttachments.value) {
+            if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+        }
+        pendingAttachments.value = [];
+
+        clearPersistedCache(MESSAGE_CACHE_KEY);
+    };
+
     return {
+        reset,
         socket,
         messages,
         activeChannelId,

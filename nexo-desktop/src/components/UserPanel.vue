@@ -87,12 +87,10 @@
 
 <script setup lang="ts">
 import { useAuthStore } from '../stores/auth';
-import { useChatStore } from '../stores/chat';
-import { useCommunityStore } from '../stores/community';
-import { useVoiceStore } from '../stores/voice';
 import { useUserSettingsStore } from '../stores/userSettings';
 import { useUserBanner } from '../composables/useUserBanner';
 import { useReadableAccent } from '../composables/useReadableAccent';
+import { resetSessionState } from '../composables/useSessionReset';
 import { useRouter } from 'vue-router';
 import UserAvatar from './UserAvatar.vue';
 
@@ -105,9 +103,6 @@ defineProps<{
 }>();
 
 const authStore = useAuthStore();
-const chatStore = useChatStore();
-const communityStore = useCommunityStore();
-const voiceStore = useVoiceStore();
 const userSettingsStore = useUserSettingsStore();
 const router = useRouter();
 
@@ -129,11 +124,7 @@ const openSettings = () => {
 };
 
 const handleLogout = () => {
-  voiceStore.leaveVoice();
-  chatStore.closeDM();
-  chatStore.disconnectSocket();
-  communityStore.setActiveCommunity('');
-  communityStore.setActiveChannel('');
+  resetSessionState();
   authStore.removeToken();
   router.push('/login');
 };

@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { useAuthStore } from './auth';
 import api from '../api/axios';
-import { hydrateCache, persistCache, COMMUNITY_MEMBERS_CACHE_KEY } from '../composables/persistedCache';
+import { hydrateCache, persistCache, clearPersistedCache, COMMUNITY_MEMBERS_CACHE_KEY } from '../composables/persistedCache';
 
 // Bitfield de permisos (debe coincidir con el backend)
 export const Permissions = {
@@ -88,6 +88,10 @@ export const useCommunityStore = defineStore('community', () => {
     const activeCommunityId = ref<string>('');
     const activeChannelId = ref<string>('');
     const isLoading = ref(false);
+    // Community to activate once the Dashboard has mounted and loaded the
+    // list (set by the invite flow, which navigates to the Dashboard whose
+    // onMounted resets the active community before fetching).
+    const pendingCommunityId = ref<string>('');
 
     // Miembros (con sus roles) de la comunidad activa — fuente única para el chat y la lista
     const activeMembers = ref<CommunityMember[]>([]);
@@ -528,10 +532,31 @@ export const useCommunityStore = defineStore('community', () => {
         loadActiveMembers(id);
     });
 
+    // Clear all per-user state, memory and persisted (logout / account switch).
+    const reset = () => {
+        if (persistMembersTimer) {
+            clearTimeout(persistMembersTimer);
+            persistMembersTimer = null;
+        }
+        communities.value = [];
+        activeCommunityId.value = '';
+        activeChannelId.value = '';
+        pendingCommunityId.value = '';
+        activeMembers.value = [];
+        activeMembersCommunityId.value = '';
+        isActiveMembersLoading.value = false;
+        isLoading.value = false;
+        membersCache.value.clear();
+        channelUnreads.value.clear();
+        clearPersistedCache(COMMUNITY_MEMBERS_CACHE_KEY);
+    };
+
     return {
+        reset,
         communities,
         activeCommunityId,
         activeChannelId,
+        pendingCommunityId,
         activeCommunity,
         activeMembers,
         isLoading,

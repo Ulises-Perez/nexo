@@ -60,6 +60,27 @@ export const useFriendsStore = defineStore('friends', () => {
         }
     };
 
+    // Loads friends + pending requests at most once per FRESH_MS, deduping
+    // concurrent callers onto the same in-flight promise. Components that
+    // mount together (sidebar + main view) no longer fire duplicate requests.
+    const FRESH_MS = 30_000;
+    let loadedAt = 0;
+    let inFlight: Promise<void> | null = null;
+
+    const ensureLoaded = (): Promise<void> => {
+        if (inFlight) return inFlight;
+        if (Date.now() - loadedAt < FRESH_MS) return Promise.resolve();
+
+        inFlight = Promise.all([fetchFriends(), fetchPendingRequests()])
+            .then(() => {
+                loadedAt = Date.now();
+            })
+            .finally(() => {
+                inFlight = null;
+            });
+        return inFlight;
+    };
+
     const searchUsers = async (query: string) => {
         if (!query.trim()) {
             searchResults.value = [];
@@ -162,12 +183,25 @@ export const useFriendsStore = defineStore('friends', () => {
         friends.value = friends.value.filter(f => f.id !== userId);
     };
 
+    // Clear all per-user state (logout / account switch).
+    const reset = () => {
+        friends.value = [];
+        pendingRequests.value = [];
+        searchResults.value = [];
+        isSearching.value = false;
+        isLoading.value = false;
+        loadedAt = 0;
+        inFlight = null;
+    };
+
     return {
+        reset,
         friends,
         pendingRequests,
         searchResults,
         isSearching,
         isLoading,
+        ensureLoaded,
         fetchFriends,
         fetchPendingRequests,
         searchUsers,

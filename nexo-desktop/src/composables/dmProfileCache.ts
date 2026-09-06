@@ -1,6 +1,6 @@
 import { reactive } from 'vue';
 import api from '../api/axios';
-import { hydrateCache, persistCache, DM_PROFILE_CACHE_KEY } from './persistedCache';
+import { hydrateCache, persistCache, clearPersistedCache, DM_PROFILE_CACHE_KEY } from './persistedCache';
 
 export interface DMProfileExtra {
     createdAt: string | null;
@@ -14,19 +14,38 @@ export interface DMProfileExtra {
     mutualCommunities: Array<{ id: string; name: string; iconUrl: string | null }>;
 }
 
+// Bounded LRU: entries hold arrays (mutual friends/communities) and one is
+// kept per user ever viewed, so without a cap the persisted blob grows for
+// the lifetime of the install. Map insertion order encodes recency: a hit
+// re-inserts the key at the end, the first key is the eviction candidate.
+const MAX_ENTRIES = 30;
+
 // Cache a nivel de módulo (sobrevive a que DMUserCard se desmonte al cerrar el
 // DM) para que reabrir un DM ya visitado muestre su info al instante en vez de
 // repetir las 3 llamadas de red cada vez. Stale-while-revalidate, igual patrón
 // que messageCache en stores/chat.ts. Hidratado desde localStorage para que
 // esto también sea instantáneo tras reiniciar la app, no solo en la sesión.
 const cache = reactive(new Map<string, DMProfileExtra>(
-    hydrateCache<Array<[string, DMProfileExtra]>>(DM_PROFILE_CACHE_KEY, 1) ?? []
+    (hydrateCache<Array<[string, DMProfileExtra]>>(DM_PROFILE_CACHE_KEY, 1) ?? []).slice(-MAX_ENTRIES)
 ));
 const loading = reactive(new Set<string>());
+// In-flight request per user: repeated loads (card toggled, user re-selected)
+// share the same promise instead of firing the request again.
+const inFlight = new Map<string, Promise<void>>();
 
 // Write-through: son payloads chicos y poco frecuentes (uno por usuario visto,
 // no por mensaje), a diferencia de messageCache no hace falta debounce.
 const persist = () => persistCache(DM_PROFILE_CACHE_KEY, 1, Array.from(cache.entries()));
+
+const touch = (userId: string, value: DMProfileExtra) => {
+    cache.delete(userId);
+    cache.set(userId, value);
+    while (cache.size > MAX_ENTRIES) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+    }
+};
 
 // Perfil + ambos "en común" en 1 sola llamada — evita 2 round-trips de red
 // extra (cada uno paga el mismo costo fijo de latencia). Devuelve `null` si el
@@ -51,12 +70,12 @@ const tryFetchCombined = async (userId: string): Promise<DMProfileExtra | null> 
     }
 };
 
-const fetchExtra = async (userId: string): Promise<void> => {
+const doFetchExtra = async (userId: string): Promise<void> => {
     loading.add(userId);
     try {
         const combined = await tryFetchCombined(userId);
         if (combined) {
-            cache.set(userId, combined);
+            touch(userId, combined);
             persist();
             return;
         }
@@ -67,7 +86,7 @@ const fetchExtra = async (userId: string): Promise<void> => {
             api.get(`/users/${userId}/mutual-friends`),
             api.get(`/users/${userId}/mutual-communities`),
         ]);
-        cache.set(userId, {
+        touch(userId, {
             createdAt: userRes.data.createdAt ?? null,
             bio: userRes.data.bio ?? null,
             bannerUrl: userRes.data.bannerUrl ?? null,
@@ -86,6 +105,16 @@ const fetchExtra = async (userId: string): Promise<void> => {
     }
 };
 
+const fetchExtra = (userId: string): Promise<void> => {
+    const existing = inFlight.get(userId);
+    if (existing) return existing;
+    const p = doFetchExtra(userId).finally(() => {
+        inFlight.delete(userId);
+    });
+    inFlight.set(userId, p);
+    return p;
+};
+
 // Sirve la entrada cacheada de inmediato si existe (y revalida en segundo
 // plano); en un cache-miss dispara el fetch. Llamar en mount y en cada cambio
 // de usuario — es seguro llamarla repetidas veces para el mismo id.
@@ -98,3 +127,11 @@ export const getDMProfileExtra = (userId: string): DMProfileExtra | null => cach
 // "Cargando" solo cuando todavía no hay nada que mostrar para este usuario —
 // una revalidación en segundo plano de una entrada ya cacheada no cuenta.
 export const isDMProfileExtraLoading = (userId: string): boolean => loading.has(userId) && !cache.has(userId);
+
+// Drop every cached profile, memory and persisted (logout / account switch).
+export const clearDMProfileCache = (): void => {
+    cache.clear();
+    loading.clear();
+    inFlight.clear();
+    clearPersistedCache(DM_PROFILE_CACHE_KEY);
+};
