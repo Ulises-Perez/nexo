@@ -10,6 +10,9 @@ export interface VoiceParticipant {
     muted: boolean;
     sharing: boolean;
     shareId: string | null;
+    // Quality preset/audio/codec the sharer announced for this share session.
+    // Purely informational for viewers/roster — the backend never inspects it.
+    sharingInfo?: { presetId: string; audio: boolean; codec: string };
     // Community that owns the voice channel, resolved once at join time so
     // per-event broadcasts never hit the database.
     communityId: string | null;
@@ -95,12 +98,40 @@ export function setParticipantMuted(channelId: string, socketId: string, muted: 
     if (participant) participant.muted = muted;
 }
 
-export function setParticipantSharing(channelId: string, socketId: string, sharing: boolean, shareId: string | null) {
+// `info` describes the quality preset/audio/codec the sharer announced for
+// this share session (Discord-grade screen share metadata). It is purely
+// informational — the backend never interprets it, only stores it for the
+// roster to relay to viewers — so untrusted client input is validated
+// defensively before it lands on the shared participant object: any field
+// out of shape drops the whole `info` rather than storing a partial/clamped
+// value that could look valid downstream.
+export function setParticipantSharing(
+    channelId: string,
+    socketId: string,
+    sharing: boolean,
+    shareId: string | null,
+    info?: { presetId: string; audio: boolean; codec: string }
+) {
     const participant = voiceChannels.get(channelId)?.get(socketId);
     if (participant) {
         participant.sharing = sharing;
         participant.shareId = shareId;
+        if (!sharing) {
+            participant.sharingInfo = undefined;
+        } else {
+            participant.sharingInfo = validateSharingInfo(info);
+        }
     }
+}
+
+function validateSharingInfo(
+    info?: { presetId: string; audio: boolean; codec: string }
+): { presetId: string; audio: boolean; codec: string } | undefined {
+    if (!info) return undefined;
+    if (typeof info.presetId !== 'string' || info.presetId.length > 16) return undefined;
+    if (typeof info.codec !== 'string' || info.codec.length > 8) return undefined;
+    const audio = typeof info.audio === 'boolean' ? info.audio : false;
+    return { presetId: info.presetId, audio, codec: info.codec };
 }
 
 // Voice state of several channels: { channelId: participants[] }

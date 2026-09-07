@@ -127,7 +127,7 @@
                 v-if="participant.sharing && participant.socketId !== voiceStore.ownSocketId()"
                 @click.stop="watchParticipant(participant)"
                 class="text-emerald-400 hover:text-emerald-300 flex-shrink-0"
-                title="Mirar transmisión"
+                :title="sharingTooltip(participant)"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -209,6 +209,24 @@ const voiceParticipants = (channelId: string) => voiceStore.getParticipants(chan
 const watchParticipant = (participant: VoiceParticipant) => {
   if (!participant.shareId) return;
   screenShareStore.watchShare(participant.socketId, participant.shareId, participant.username);
+};
+
+// Human-readable preset label for the sharing tooltip — kept as a small local
+// lookup (rather than importing the full preset list) to keep this
+// component's diff small.
+const PRESET_LABELS: Record<string, string> = {
+  '720p30': '720p',
+  '1080p30': '1080p',
+  '1080p60': '1080p60',
+  '1440p60': '1440p60',
+  source: 'Source',
+};
+
+const sharingTooltip = (participant: VoiceParticipant): string => {
+  const info = participant.sharingInfo;
+  if (!info) return 'Mirar transmisión';
+  const presetLabel = PRESET_LABELS[info.presetId] ?? info.presetId;
+  return `Compartiendo · ${presetLabel}${info.audio ? ' · audio' : ''}`;
 };
 
 // Abre el menú de opciones de un participante: click en la fila (acción

@@ -632,10 +632,15 @@ export const setupSockets = (io: Server) => {
             emitVoiceStateUpdate(io, channelId);
         });
 
-        on('start_screen_share', async (data: { shareId: string }) => {
+        on('start_screen_share', async (data: { shareId: string; presetId?: string; audio?: boolean; codec?: string }) => {
             const channelId = findVoiceChannelOfSocket(socket.id);
             if (!channelId || typeof data?.shareId !== 'string') return;
-            setParticipantSharing(channelId, socket.id, true, data.shareId);
+            // Quality metadata is optional: an older client that only sends
+            // `shareId` keeps working exactly as before (info stays undefined).
+            const info = typeof data?.presetId === 'string'
+                ? { presetId: data.presetId, audio: !!data.audio, codec: typeof data.codec === 'string' ? data.codec : '' }
+                : undefined;
+            setParticipantSharing(channelId, socket.id, true, data.shareId, info);
             emitVoiceStateUpdate(io, channelId);
         });
 

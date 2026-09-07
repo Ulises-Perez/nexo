@@ -164,7 +164,6 @@
     <UserSettingsModal :show="userSettingsStore.isOpen" @close="userSettingsStore.close()" />
 
     <!-- Screen Share (global) -->
-    <ScreenShareQualityModal />
     <ScreenShareViewer />
     <ScreenShareSelfPreview />
   </div>
@@ -191,7 +190,6 @@ import CreateCategoryModal from '../components/CreateCategoryModal.vue';
 import CommunitySettingsModal from '../components/CommunitySettingsModal.vue';
 import UserProfileModal from '../components/UserProfileModal.vue';
 import UserSettingsModal from '../components/UserSettingsModal.vue';
-import ScreenShareQualityModal from '../components/ScreenShareQualityModal.vue';
 import ScreenShareViewer from '../components/ScreenShareViewer.vue';
 import ScreenShareSelfPreview from '../components/ScreenShareSelfPreview.vue';
 import { useUserSettingsStore } from '../stores/userSettings';

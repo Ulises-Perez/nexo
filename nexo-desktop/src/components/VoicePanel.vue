@@ -69,25 +69,40 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
       </svg>
     </button>
+
+    <ScreenShareQualityModal
+      :show="showQualityPicker"
+      @close="showQualityPicker = false"
+      @confirm="onQualityConfirm"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useVoiceStore } from '../stores/voice';
 import { useCommunityStore } from '../stores/community';
 import { useScreenShareStore } from '../stores/screenShare';
+import type { ScreenShareOptions } from '../lib/screenShare/presets';
+import ScreenShareQualityModal from './ScreenShareQualityModal.vue';
 
 const voiceStore = useVoiceStore();
 const communityStore = useCommunityStore();
 const screenShareStore = useScreenShareStore();
 
+const showQualityPicker = ref(false);
+
 const toggleShare = () => {
   if (screenShareStore.isSharing) {
     screenShareStore.stopSharing();
   } else {
-    screenShareStore.showQualityPicker = true;
+    showQualityPicker.value = true;
   }
+};
+
+const onQualityConfirm = (options: ScreenShareOptions) => {
+  showQualityPicker.value = false;
+  screenShareStore.startSharing(options);
 };
 
 const channelName = computed(() => {

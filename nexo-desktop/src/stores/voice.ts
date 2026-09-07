@@ -12,15 +12,28 @@ export interface VoiceParticipant {
     muted: boolean;
     sharing: boolean;
     shareId: string | null;
+    // Populated by the server alongside sharing/shareId when this participant
+    // is screen sharing; the quality/codec they chose, shown read-only to
+    // other participants (e.g. in the viewer UI before joining a watch).
+    sharingInfo?: { presetId: string; audio: boolean; codec: string };
 }
 
-// Compartido con screenShare.ts: misma config (solo STUN) para las conexiones de pantalla.
-export const RTC_CONFIG: RTCConfiguration = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-    ],
-};
+// Compartido con screenShare.ts. STUN-only by default; a TURN server is
+// added on top when VITE_TURN_URLS is configured (needed for peers behind
+// symmetric NAT/restrictive firewalls where STUN alone can't establish a path).
+const iceServers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+];
+const turnUrls = import.meta.env.VITE_TURN_URLS as string | undefined;
+if (turnUrls) {
+    iceServers.push({
+        urls: turnUrls.split(',').map(s => s.trim()).filter(Boolean),
+        username: import.meta.env.VITE_TURN_USERNAME as string | undefined,
+        credential: import.meta.env.VITE_TURN_CREDENTIAL as string | undefined,
+    });
+}
+export const RTC_CONFIG: RTCConfiguration = { iceServers };
 
 export const useVoiceStore = defineStore('voice', () => {
     // Canal de voz al que estoy conectado ('' = ninguno)
