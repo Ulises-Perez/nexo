@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
+import { useUserSettingsStore } from './userSettings';
 
 // Estado global del modal de perfil de usuario (se abre desde chat, lista de miembros o canales de voz)
 export const useUserProfileStore = defineStore('userProfile', () => {
@@ -9,6 +10,9 @@ export const useUserProfileStore = defineStore('userProfile', () => {
     const communityId = ref('');
 
     const open = (targetUserId: string, targetCommunityId?: string) => {
+        // Los modales de perfil y de ajustes están siempre montados; abrir uno
+        // cierra el otro para que nunca queden superpuestos.
+        useUserSettingsStore().close();
         userId.value = targetUserId;
         communityId.value = targetCommunityId ?? '';
         isOpen.value = true;

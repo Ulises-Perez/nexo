@@ -111,16 +111,26 @@
               {{ isUploadingBanner ? 'Subiendo...' : 'Subir imagen' }}
             </button>
             <input ref="bannerFileInput" type="file" accept="image/*" class="hidden" @change="handleBannerUpload" />
+            <img
+              v-if="form.bannerUrl"
+              :src="form.bannerUrl"
+              class="hidden"
+              alt=""
+              @error="bannerError = 'La imagen se subió pero no se puede cargar desde esa URL.'"
+              @load="bannerError = ''"
+            />
 
             <button
               v-if="form.bannerUrl"
               type="button"
-              @click="form.bannerUrl = ''"
+              @click="form.bannerUrl = ''; bannerError = ''"
               class="text-[12px] text-gray-400 hover:text-red-400 transition-colors"
             >
               Quitar imagen
             </button>
           </div>
+
+          <p v-if="bannerError" class="text-red-400 text-[12px] -mt-1.5 mb-3">{{ bannerError }}</p>
 
           <div class="grid grid-cols-2 gap-3">
             <div>
@@ -350,6 +360,7 @@ const isUploadingBanner = ref(false);
 const isAddingConnection = ref(false);
 const isResettingMic = ref(false);
 const errorMessage = ref('');
+const bannerError = ref('');
 const connectionError = ref('');
 const micResetMessage = ref('');
 const micResetError = ref(false);
@@ -406,6 +417,7 @@ watch(() => props.show, (newVal) => {
     connections.value = u?.connections ? [...u.connections] : [];
     newConnection.value = { platform: PLATFORMS[0], name: '', url: '' };
     errorMessage.value = '';
+    bannerError.value = '';
     connectionError.value = '';
   }
 });
@@ -417,17 +429,22 @@ const handleBannerUpload = async (event: Event) => {
 
   isUploadingBanner.value = true;
   errorMessage.value = '';
+  bannerError.value = '';
   try {
     // Reuse the chat attachment presign flow; the returned cdnUrl is the banner.
     const result = await chatStore.uploadFile(file);
     if (result.cdnUrl) {
       form.value.bannerUrl = result.cdnUrl;
+    } else {
+      bannerError.value = 'El servidor no devolvió una URL para la imagen.';
     }
     // Keep the pending-attachments list clean (this upload is not a message).
     chatStore.removePendingAttachment(result.id);
   } catch (error) {
     console.error('Error subiendo banner:', error);
-    errorMessage.value = 'No se pudo subir la imagen del banner.';
+    bannerError.value = error instanceof Error && error.message
+        ? `No se pudo subir la imagen: ${error.message}`
+        : 'No se pudo subir la imagen del banner.';
   } finally {
     // On failure, uploadFile pushes an 'error'-status attachment and throws
     // before returning its id, so it would otherwise leak into the chat
