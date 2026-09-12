@@ -1,6 +1,6 @@
 import { prisma } from '../db/prisma';
 
-// Bitfield de permisos por comunidad (estilo Discord)
+// Bitfield de permisos por comunidad
 export const Permissions = {
     ADMINISTRATOR:    1 << 0, // Acceso total (todos los permisos)
     MANAGE_COMMUNITY: 1 << 1, // Editar nombre/icono/descripción de la comunidad

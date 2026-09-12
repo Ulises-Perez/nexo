@@ -180,7 +180,7 @@ export const useVoiceStore = defineStore('voice', () => {
         }
     };
 
-    // Dos tonos ascendentes al entrar, descendentes al salir (estilo Discord)
+    // Dos tonos ascendentes al entrar, descendentes al salir
     const playJoinSound = () => playTone([{ freq: 540, at: 0 }, { freq: 740, at: 0.12 }]);
     const playLeaveSound = () => playTone([{ freq: 640, at: 0 }, { freq: 420, at: 0.12 }]);
 
@@ -736,7 +736,7 @@ export const useVoiceStore = defineStore('voice', () => {
     const toggleDeafen = () => {
         isDeafened.value = !isDeafened.value;
         applyAllOutputState();
-        // Al ensordecer también se silencia el micrófono (como Discord)
+        // Al ensordecer también se silencia el micrófono
         if (isDeafened.value && !isMuted.value) {
             toggleMute();
         }

@@ -28,7 +28,7 @@
                :class="communityStore.activeCommunityId === community.id ? 'h-10' : 'h-0 group-hover:h-5'">
           </div>
 
-          <!-- Punto de no leídos (estilo Discord): visible solo si hay no leídos
+          <!-- Punto de no leídos: visible solo si hay no leídos
                y la comunidad no es la activa, para no chocar con la píldora activa. -->
           <div
             v-if="communityStore.activeCommunityId !== community.id && communityStore.getCommunityUnread(community.id) > 0"

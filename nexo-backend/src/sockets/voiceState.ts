@@ -99,8 +99,7 @@ export function setParticipantMuted(channelId: string, socketId: string, muted: 
 }
 
 // `info` describes the quality preset/audio/codec the sharer announced for
-// this share session (Discord-grade screen share metadata). It is purely
-// informational — the backend never interprets it, only stores it for the
+// this share session. It is purely informational — the backend never interprets it, only stores it for the
 // roster to relay to viewers — so untrusted client input is validated
 // defensively before it lands on the shared participant object: any field
 // out of shape drops the whole `info` rather than storing a partial/clamped

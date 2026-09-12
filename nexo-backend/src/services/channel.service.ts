@@ -17,7 +17,7 @@ import type {
     GetMessagesQuery,
 } from '../schemas/channel.schema';
 
-// Text channels use Discord-style names: lowercase and hyphenated.
+// Text channel names are normalized to lowercase and hyphenated.
 function normalizeChannelName(name: string, type: string): string {
     if (type === 'voice') return name;
     return name.toLowerCase().replace(/\s+/g, '-').replace(/-+/g, '-');
