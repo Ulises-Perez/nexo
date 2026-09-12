@@ -1,11 +1,14 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import type { Socket } from 'socket.io-client';
+import api from '../api/axios';
 import { RTC_CONFIG, useVoiceStore } from './voice';
+import { useAuthStore } from './auth';
 import {
     DEFAULT_SCREEN_SHARE_OPTIONS,
     getPreset,
     buildDisplayMediaConstraints,
+    sanitizeScreenShareOptions,
     type ScreenSharePreset,
     type OptimizeFor,
     type ScreenShareOptions,
@@ -50,16 +53,59 @@ export const useScreenShareStore = defineStore('screenShare', () => {
 
     // Last options the user picked to start a share, persisted across
     // restarts so the quality picker remembers the previous choice.
+    // Sanitized field-wise: a stale/unknown preset id (e.g. a preset removed
+    // in a later release) never throws — it falls back per-field instead of
+    // discarding the whole stored value.
     const loadStoredOptions = (): ScreenShareOptions => {
         try {
             const raw = localStorage.getItem(OPTIONS_STORAGE_KEY);
             if (!raw) return DEFAULT_SCREEN_SHARE_OPTIONS;
-            return JSON.parse(raw) as ScreenShareOptions;
+            return sanitizeScreenShareOptions(JSON.parse(raw));
         } catch {
             return DEFAULT_SCREEN_SHARE_OPTIONS;
         }
     };
     const lastOptions = ref<ScreenShareOptions>(loadStoredOptions());
+
+    // Account is the source of truth for cross-device persistence;
+    // localStorage is only the offline/first-run fallback. The store is
+    // created before login resolves (Dashboard setup), so `authStore.user`
+    // isn't known synchronously here — hydration re-runs once it is (see the
+    // `immediate: true` watcher below).
+    const authStore = useAuthStore();
+
+    const hydrateFromAccount = () => {
+        const accountValue = authStore.user?.screenSharePrefs;
+        if (accountValue == null) return; // no account preference yet — keep localStorage/default
+        const sanitized = sanitizeScreenShareOptions(accountValue);
+        lastOptions.value = sanitized;
+        try {
+            localStorage.setItem(OPTIONS_STORAGE_KEY, JSON.stringify(sanitized));
+        } catch {
+            // Persistence is best-effort (private browsing, quota, etc.).
+        }
+    };
+
+    // Only ever assigns `lastOptions` (read by the quality modal/preview on
+    // open) — never `currentShareOptions`, which is set once per share in
+    // `startSharing` and left alone for the rest of that share's lifetime.
+    watch(() => authStore.user?.screenSharePrefs, hydrateFromAccount, { immediate: true });
+
+    const optionsEqual = (a: ScreenShareOptions, b: unknown): boolean => {
+        if (!b || typeof b !== 'object') return false;
+        const other = b as Record<string, unknown>;
+        return a.presetId === other.presetId && a.optimizeFor === other.optimizeFor && a.codec === other.codec;
+    };
+
+    // Best-effort, non-fatal: a failed write-through never blocks or delays
+    // sharing — it just means cross-device sync didn't happen this time.
+    const writeThroughOptions = (options: ScreenShareOptions) => {
+        if (!authStore.user || optionsEqual(options, authStore.user.screenSharePrefs)) return;
+        authStore.user.screenSharePrefs = options;
+        api.patch('/users/me', { screenSharePrefs: options }).catch((err) => {
+            console.warn('[ScreenShare] No se pudo sincronizar la preferencia de calidad con la cuenta:', err);
+        });
+    };
 
     // Live aggregated stats for the local share, across all current watchers.
     const sharerStats = ref<{
@@ -171,8 +217,12 @@ export const useScreenShareStore = defineStore('screenShare', () => {
         if (!socket || isSharing.value) return;
         try {
             const preset = getPreset(options.presetId);
-            const constraints = buildDisplayMediaConstraints(preset, options.shareAudio);
+            const constraints = buildDisplayMediaConstraints(preset);
             localScreenStream = await navigator.mediaDevices.getDisplayMedia(constraints);
+            // Whether audio actually made it in is the browser picker's call
+            // (its own "share system audio" toggle), not a pre-flight guess —
+            // read it back from the resulting stream instead of asking twice.
+            const hasAudio = localScreenStream.getAudioTracks().length > 0;
             const [track] = localScreenStream.getVideoTracks();
             if (track) {
                 track.contentHint = options.optimizeFor;
@@ -197,11 +247,12 @@ export const useScreenShareStore = defineStore('screenShare', () => {
             } catch {
                 // Persistence is best-effort (private browsing, quota, etc.).
             }
+            writeThroughOptions(options);
 
             socket.emit('start_screen_share', {
                 shareId: localShareId.value,
                 presetId: options.presetId,
-                audio: options.shareAudio,
+                audio: hasAudio,
                 codec: options.codec,
             });
             isSharing.value = true;

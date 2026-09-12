@@ -43,6 +43,19 @@ const nullableHex = z
     .optional()
     .transform((v) => (v === undefined ? undefined : v === null || v === '' ? null : v));
 
+// Bounded, non-strict-enum strings (mirrors voiceState.ts's
+// validateSharingInfo): a new preset/codec/optimizeFor value added on the
+// client never requires a backend deploy. `null` is intentionally not
+// accepted — clearing the preference is not a product need, and Prisma's
+// `Json?` update input treats plain `null` differently from `Prisma.JsonNull`.
+export const screenSharePrefsSchema = z
+    .object({
+        presetId: z.string().trim().min(1).max(16),
+        optimizeFor: z.string().trim().min(1).max(16),
+        codec: z.string().trim().min(1).max(8),
+    })
+    .strict();
+
 export const updateMeSchema = z.object({
     username: username.optional(),
     avatarUrl: nullableUrl,
@@ -52,6 +65,7 @@ export const updateMeSchema = z.object({
     bio: nullableText(190),
     pronouns: nullableText(40),
     customStatus: nullableText(128),
+    screenSharePrefs: screenSharePrefsSchema.optional(),
 });
 
 export const searchQuerySchema = z.object({

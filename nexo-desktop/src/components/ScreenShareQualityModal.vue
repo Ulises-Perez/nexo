@@ -70,15 +70,6 @@
         </div>
       </div>
 
-      <!-- Audio del sistema -->
-      <div class="mb-4">
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" v-model="shareAudio" class="accent-indigo-500 w-4 h-4" />
-          <span class="text-gray-200 text-sm font-medium">Compartir audio del sistema</span>
-        </label>
-        <p class="text-gray-500 text-xs mt-1 ml-6">Funciona al compartir toda la pantalla (Windows)</p>
-      </div>
-
       <!-- Avanzado -->
       <div class="mb-4 border-t border-[#26272b] pt-3">
         <button
@@ -121,13 +112,16 @@
       >
         Cancelar
       </button>
-      <button
-        type="button"
-        @click="confirm"
-        class="bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2.5 rounded font-medium transition-colors"
-      >
-        Compartir pantalla
-      </button>
+      <div class="flex flex-col items-end gap-1">
+        <button
+          type="button"
+          @click="confirm"
+          class="bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2.5 rounded font-medium transition-colors"
+        >
+          Compartir pantalla
+        </button>
+        <p class="text-gray-500 text-[11px]">El audio del sistema se activa en el selector de Windows</p>
+      </div>
     </footer>
   </BaseModal>
 </template>
@@ -160,7 +154,6 @@ const screenShareStore = useScreenShareStore();
 
 const presetId = ref<ScreenSharePresetId>(DEFAULT_SCREEN_SHARE_OPTIONS.presetId);
 const optimizeFor = ref<OptimizeFor>(DEFAULT_SCREEN_SHARE_OPTIONS.optimizeFor);
-const shareAudio = ref<boolean>(DEFAULT_SCREEN_SHARE_OPTIONS.shareAudio);
 const codec = ref<ScreenCodec>(DEFAULT_SCREEN_SHARE_OPTIONS.codec);
 const advancedOpen = ref(false);
 const av1Supported = ref(false);
@@ -178,7 +171,6 @@ watch(
     const last = screenShareStore.lastOptions;
     presetId.value = last.presetId;
     optimizeFor.value = last.optimizeFor;
-    shareAudio.value = last.shareAudio;
     codec.value = last.codec;
   }
 );
@@ -194,7 +186,6 @@ const confirm = () => {
   emit('confirm', {
     presetId: presetId.value,
     optimizeFor: optimizeFor.value,
-    shareAudio: shareAudio.value,
     codec: codec.value,
   });
 };

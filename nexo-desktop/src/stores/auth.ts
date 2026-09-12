@@ -26,6 +26,9 @@ export interface User {
     pronouns?: string | null;
     customStatus?: string | null;
     connections?: UserConnection[];
+    // Private, /users/me only — untrusted until run through
+    // sanitizeScreenShareOptions(), hence `unknown` rather than a typed shape.
+    screenSharePrefs?: unknown;
     // Only present on /users/me.
     email?: string;
 }

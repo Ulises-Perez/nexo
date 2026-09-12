@@ -93,24 +93,61 @@ export type ScreenCodec = 'auto' | 'vp9' | 'h264' | 'av1';
 export interface ScreenShareOptions {
     presetId: ScreenSharePresetId;
     optimizeFor: OptimizeFor;
-    shareAudio: boolean;
     codec: ScreenCodec;
 }
 
 export const DEFAULT_SCREEN_SHARE_OPTIONS: ScreenShareOptions = {
     presetId: DEFAULT_PRESET_ID,
     optimizeFor: 'motion',
-    shareAudio: false,
     codec: 'auto',
 };
+
+const OPTIMIZE_FOR_VALUES: readonly OptimizeFor[] = ['motion', 'detail'];
+const SCREEN_CODEC_VALUES: readonly ScreenCodec[] = ['auto', 'vp9', 'h264', 'av1'];
+
+export function isScreenSharePresetId(id: unknown): id is ScreenSharePresetId {
+    return typeof id === 'string' && SCREEN_SHARE_PRESETS.some((p) => p.id === id);
+}
+
+function isOptimizeFor(value: unknown): value is OptimizeFor {
+    return typeof value === 'string' && (OPTIMIZE_FOR_VALUES as readonly string[]).includes(value);
+}
+
+function isScreenCodec(value: unknown): value is ScreenCodec {
+    return typeof value === 'string' && (SCREEN_CODEC_VALUES as readonly string[]).includes(value);
+}
+
+// Pure, field-wise sanitizer: any unknown/missing/malformed field falls back
+// to its own default instead of discarding the whole object, so a stale
+// presetId (e.g. an old device's DB row, or a preset removed in a later
+// release) doesn't also throw away a still-valid codec/optimizeFor choice.
+// `getPreset` itself keeps throwing on an invalid id — this is what
+// guarantees callers never pass it one.
+export function sanitizeScreenShareOptions(raw: unknown): ScreenShareOptions {
+    const candidate = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    return {
+        presetId: isScreenSharePresetId(candidate.presetId)
+            ? candidate.presetId
+            : DEFAULT_SCREEN_SHARE_OPTIONS.presetId,
+        optimizeFor: isOptimizeFor(candidate.optimizeFor)
+            ? candidate.optimizeFor
+            : DEFAULT_SCREEN_SHARE_OPTIONS.optimizeFor,
+        codec: isScreenCodec(candidate.codec) ? candidate.codec : DEFAULT_SCREEN_SHARE_OPTIONS.codec,
+    };
+}
 
 // Chromium-specific capture constraints (selfBrowserSurface, surfaceSwitching,
 // monitorTypeSurfaces, systemAudio) are not yet part of lib.dom's
 // MediaTrackConstraints typings, hence the casts below.
-export function buildDisplayMediaConstraints(
-    preset: ScreenSharePreset,
-    shareAudio: boolean
-): DisplayMediaStreamOptions {
+//
+// Audio is always requested here — whether system audio actually gets
+// captured is decided once, by the user, in the browser's own picker
+// (which shows its own "share system audio" toggle whenever audio is
+// requested at all). A separate pre-picker checkbox in our own UI would
+// just ask the same question twice in two different dialogs; the real
+// outcome is read back from the resulting stream's audio tracks after
+// getDisplayMedia resolves, not decided ahead of time.
+export function buildDisplayMediaConstraints(preset: ScreenSharePreset): DisplayMediaStreamOptions {
     const videoConstraints: MediaTrackConstraints & Record<string, unknown> = {
         frameRate: { ideal: preset.fps, max: preset.fpsMax },
         // Hide our own window from the picker, allow switching the shared
@@ -125,13 +162,11 @@ export function buildDisplayMediaConstraints(
 
     return {
         video: videoConstraints,
-        audio: shareAudio
-            ? ({
-                  echoCancellation: false,
-                  noiseSuppression: false,
-                  autoGainControl: false,
-                  systemAudio: 'include',
-              } as MediaTrackConstraints)
-            : false,
+        audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            systemAudio: 'include',
+        } as MediaTrackConstraints,
     };
 }

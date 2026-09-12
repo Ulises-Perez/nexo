@@ -19,6 +19,7 @@ model User {
   accentColor   String?
   pronouns      String?
   customStatus  String?
+  screenSharePrefs Json?
   createdAt     DateTime           @default(now())
   communities   CommunityMember[]
   messages      Message[]

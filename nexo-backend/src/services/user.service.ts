@@ -17,6 +17,7 @@ const ME_SELECT = {
     accentColor: true,
     pronouns: true,
     customStatus: true,
+    screenSharePrefs: true,
     createdAt: true,
     connections: {
         orderBy: { createdAt: 'asc' as const },
@@ -78,7 +79,22 @@ export interface UpdateMeInput {
     bio?: string | null;
     pronouns?: string | null;
     customStatus?: string | null;
+    screenSharePrefs?: { presetId: string; optimizeFor: string; codec: string };
 }
+
+// Fields that are broadcast to communities/friends via `user_updated`. The
+// screen-share preference is private (ME_SELECT only) and never part of
+// this list, so a preference-only PATCH can skip the broadcast entirely.
+const PUBLIC_PATCH_KEYS = [
+    'username',
+    'avatarUrl',
+    'bannerUrl',
+    'bannerColor',
+    'accentColor',
+    'bio',
+    'pronouns',
+    'customStatus',
+] as const;
 
 export async function updateMe(userId: string, input: UpdateMeInput) {
     let user;
@@ -99,6 +115,7 @@ export async function updateMe(userId: string, input: UpdateMeInput) {
                 accentColor: true,
                 pronouns: true,
                 customStatus: true,
+                screenSharePrefs: true,
                 createdAt: true,
             },
         });
@@ -109,10 +126,16 @@ export async function updateMe(userId: string, input: UpdateMeInput) {
         throw err;
     }
 
+    // Zod maps an absent PATCH key to `undefined`, so key presence here is
+    // exactly "this PATCH touched a publicly-broadcast field" — no extra
+    // read or before/after diff needed.
+    const touchesPublic = PUBLIC_PATCH_KEYS.some((k) => input[k] !== undefined);
+
     // Propagate the profile change in real time to communities, friends and
-    // the user's own sessions.
+    // the user's own sessions. Skipped entirely for a preference-only PATCH:
+    // saves both room-lookup queries and the broadcast.
     const io = getIO();
-    if (io) {
+    if (io && touchesPublic) {
         const payload = {
             user: {
                 id: user.id,
